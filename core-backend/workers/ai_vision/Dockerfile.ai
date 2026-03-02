@@ -1,0 +1,10 @@
+FROM ultralytics/ultralytics:latest-cpu
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y ffmpeg
+RUN pip install --no-cache-dir nats-py
+
+COPY vessel_worker.py .
+
+CMD ["python", "vessel_worker.py"]

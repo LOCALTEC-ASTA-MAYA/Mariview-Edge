@@ -1,0 +1,67 @@
+# Build output
+/mariview-frontend/build
+/mariview-frontend/dist
+
+# Node modules
+mariview-frontend/node_modules
+
+# Environment variables
+mariview-frontend/.env
+mariview-frontend/.env.local
+mariview-frontend/.env.development.local
+mariview-frontend/.env.test.local
+mariview-frontend/.env.production.local
+
+# Log files
+mariview-frontend/npm-debug.log*
+mariview-frontend/yarn-debug.log*
+mariview-frontend/yarn-error.log*
+
+# macOS
+mariview-frontend/.DS_Store
+
+# mp4
+*.mp4
+
+# Windows
+mariview-frontend/Thumbs.db
+
+# IDE/Editor files
+mariview-frontend/.vscode/
+mariview-frontend/.idea/
+
+# Build artifacts
+mariview-frontend/*.log
+mariview-frontend/*.tmp
+
+# Executables
+mariview-frontend/*.exe
+
+demo
+
+core-backend/data/
+
+core-backend/main
+core-backend/*.exe
+core-backend/*.out
+core-backend/.go/
+
+core-backend/__pycache__/
+core-backend/*.pyc
+core-backend/*.pyo
+core-backend/venv/
+core-backend/env/
+core-backend/.env
+
+core-backend/*.pt
+core-backend/*.onnx
+core-backend/*.weights
+
+core-backend/*.mp4
+core-backend/*.avi
+core-backend/*.mkv
+core-backend/*.rtsp
+
+
+core-backend/.DS_Store
+core-backend/Thumbs.db

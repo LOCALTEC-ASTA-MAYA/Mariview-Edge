@@ -1,0 +1,168 @@
+scalar Time
+scalar Map
+
+type User {
+    id: ID!
+    keycloakId: String!
+    name: String!
+    role: String!
+    email: String!
+    status: String!
+    createdAt: Time!
+}
+
+type Asset {
+    id: ID!
+    name: String!
+    type: String!
+    category: String!
+    status: String!
+    battery: Float!
+    lastService: Time!
+}
+
+type PreFlightCheck {
+    missionId: ID!
+    hullIntegrity: Boolean!
+    sonarSystem: Boolean!
+    batteryConn: Boolean!
+    thruster: Boolean!
+    depthSensor: Boolean!
+    waterproofSeals: Boolean!
+    navigationSystem: Boolean!
+    communication: Boolean!
+    verifiedAt: Time
+}
+
+type Mission {
+    id: ID!
+    missionCode: String!
+    name: String!
+    category: String!
+    status: String!
+    areaPolygon: String!
+    duration: Int!
+    asset: Asset!
+    pilot: User!
+    teamMemberIds: String
+    preFlight: PreFlightCheck
+    startedAt: Time
+    endedAt: Time
+    createdAt: Time!
+}
+
+type TelemetryPoint {
+    time: Time!
+    battery: Float
+    alt: Float
+    spd: Float
+    dist: Float
+    sig: Float
+    gpsSats: Int
+    lat: Float
+    lon: Float
+}
+
+type AIDetection {
+    time: Time!
+    flightId: String!
+    modelType: String!
+    confidence: Float!
+    bboxX1: Float!
+    bboxY1: Float!
+    bboxX2: Float!
+    bboxY2: Float!
+}
+
+type Vessel {
+    id: ID!
+    mmsi: String!
+    name: String!
+    type: String!
+    position: [Float!]!
+    speed: Float!
+    course: Float!
+    heading: Float!
+    status: String!
+    length: Float!
+}
+
+type LiveDrone {
+    id: ID!
+    missionId: String!
+    assetId: String!
+    flightId: String!
+    droneName: String!
+    droneType: String!
+    position: [Float!]!
+    battery: Float!
+    altitude: Float!
+    speed: Float!
+    distance: Float!
+    signal: Float!
+    gpsSats: Int!
+}
+
+type Flight {
+    id: ID!
+    icao24: String!
+    callsign: String!
+    aircraftType: String!
+    position: [Float!]!
+    altitude: Float!
+    speed: Float!
+    heading: Float!
+    onGround: Boolean!
+}
+
+type Query {
+    getMissions(status: String): [Mission!]!
+    getMissionById(id: ID!): Mission!
+    
+    getAssets(category: String): [Asset!]!
+    getAssetById(id: ID!): Asset!
+    
+    getMissionTelemetry(missionId: ID!, startTime: Time, endTime: Time): [TelemetryPoint!]!
+    getMissionDetections(missionId: ID!, modelType: String): [AIDetection!]!
+    
+    getAISVessels: [Vessel!]!
+    getLiveDrones: [LiveDrone!]!
+    getLiveFlights: [Flight!]!
+    
+    getCurrentUser: User!
+    getPilots(role: String): [User!]!
+}
+
+input CreateMissionInput {
+    missionCode: String!
+    name: String!
+    category: String!
+    areaPolygon: String!
+    duration: Int!
+    assetId: ID!
+    pilotId: ID!
+    teamMemberIds: String
+}
+
+input UpdatePreFlightInput {
+    missionId: ID!
+    hullIntegrity: Boolean!
+    sonarSystem: Boolean!
+    batteryConn: Boolean!
+    thruster: Boolean!
+    depthSensor: Boolean!
+    waterproofSeals: Boolean!
+    navigationSystem: Boolean!
+    communication: Boolean!
+}
+
+type Mutation {
+    createMission(input: CreateMissionInput!): Mission!
+    updateMissionStatus(id: ID!, status: String!): Mission!
+    deleteMission(id: ID!): Boolean!
+    
+    submitPreFlightCheck(input: UpdatePreFlightInput!): PreFlightCheck!
+    
+    startMission(id: ID!): Mission!
+    abortMission(id: ID!): Mission!
+}

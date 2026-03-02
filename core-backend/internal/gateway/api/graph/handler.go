@@ -1,0 +1,493 @@
+package graph
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"locallitix-core/internal/domain"
+	"locallitix-core/internal/infrastructure/database"
+	influxclient "locallitix-core/pkg/influxclient"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+)
+
+// influxClient is set from main.go during initialization.
+var influxClient *influxclient.Client
+
+// SetInfluxClient injects the Phase 2 InfluxDB client for resolvers to use.
+func SetInfluxClient(c *influxclient.Client) {
+	influxClient = c
+}
+
+// GraphQLRequest represents an incoming GraphQL request
+type GraphQLRequest struct {
+	Query         string                 `json:"query"`
+	OperationName string                 `json:"operationName"`
+	Variables     map[string]interface{} `json:"variables"`
+}
+
+// GraphQLResponse represents a GraphQL response
+type GraphQLResponse struct {
+	Data   interface{}    `json:"data,omitempty"`
+	Errors []GraphQLError `json:"errors,omitempty"`
+}
+
+type GraphQLError struct {
+	Message string `json:"message"`
+}
+
+// Handler returns the main GraphQL HTTP handler
+func Handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req GraphQLRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, "Invalid request body")
+			return
+		}
+
+		data, err := executeQuery(req)
+		if err != nil {
+			writeError(w, err.Error())
+			return
+		}
+
+		resp := GraphQLResponse{Data: data}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func writeError(w http.ResponseWriter, msg string) {
+	resp := GraphQLResponse{
+		Errors: []GraphQLError{{Message: msg}},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK) // GraphQL always returns 200
+	json.NewEncoder(w).Encode(resp)
+}
+
+func executeQuery(req GraphQLRequest) (map[string]interface{}, error) {
+	query := strings.TrimSpace(req.Query)
+	result := make(map[string]interface{})
+
+	if strings.HasPrefix(query, "query") || strings.HasPrefix(query, "{") {
+		return resolveQueries(query, req.Variables)
+	}
+
+	if strings.HasPrefix(query, "mutation") {
+		return resolveMutations(query, req.Variables)
+	}
+
+	return result, fmt.Errorf("unsupported operation")
+}
+
+// ===================================================
+// QUERY RESOLVERS
+// ===================================================
+
+func resolveQueries(query string, variables map[string]interface{}) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+	db := database.DB
+
+	if containsField(query, "getMissions") {
+		missions, err := queryMissions(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["getMissions"] = missions
+	}
+
+	if containsField(query, "getMissionById") {
+		mission, err := queryMissionByID(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["getMissionById"] = mission
+	}
+
+	if containsField(query, "getAssets") {
+		assets, err := queryAssets(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["getAssets"] = assets
+	}
+
+	if containsField(query, "getAssetById") {
+		asset, err := queryAssetByID(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["getAssetById"] = asset
+	}
+
+	if containsField(query, "getAISVessels") {
+		vessels, err := queryAISVessels(influxClient)
+		if err != nil {
+			log.Printf("[GQL] getAISVessels error: %v", err)
+			// Return empty array instead of failing the whole query
+			result["getAISVessels"] = []Vessel{}
+		} else {
+			result["getAISVessels"] = vessels
+		}
+	}
+
+	if containsField(query, "getLiveDrones") {
+		drones, err := queryLiveDrones(influxClient)
+		if err != nil {
+			log.Printf("[GQL] getLiveDrones error: %v", err)
+			result["getLiveDrones"] = []LiveDrone{}
+		} else {
+			result["getLiveDrones"] = drones
+		}
+	}
+
+	if containsField(query, "getLiveFlights") {
+		flights, err := queryLiveFlights(influxClient)
+		if err != nil {
+			log.Printf("[GQL] getLiveFlights error: %v", err)
+			result["getLiveFlights"] = []Flight{}
+		} else {
+			result["getLiveFlights"] = flights
+		}
+	}
+
+	if containsField(query, "getCurrentUser") {
+		// Placeholder — in production, extract from context
+		result["getCurrentUser"] = nil
+	}
+
+	if containsField(query, "getPilots") {
+		pilots, err := queryPilots(db, variables)
+		if err != nil {
+			log.Printf("[GQL] getPilots error: %v", err)
+			result["getPilots"] = []domain.User{}
+		} else {
+			result["getPilots"] = pilots
+		}
+	}
+
+	return result, nil
+}
+
+func queryMissions(db *gorm.DB, variables map[string]interface{}) ([]domain.Mission, error) {
+	var missions []domain.Mission
+	q := db.Preload("Asset").Preload("Pilot").Order("created_at DESC")
+
+	if status, ok := variables["status"].(string); ok && status != "" {
+		q = q.Where("status = ?", status)
+	}
+
+	if err := q.Find(&missions).Error; err != nil {
+		log.Printf("[GQL] Failed to query missions: %v", err)
+		return nil, fmt.Errorf("failed to fetch missions")
+	}
+	return missions, nil
+}
+
+func queryMissionByID(db *gorm.DB, variables map[string]interface{}) (*domain.Mission, error) {
+	id, ok := variables["id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("id is required")
+	}
+
+	var mission domain.Mission
+	if err := db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", id).Error; err != nil {
+		return nil, fmt.Errorf("mission not found")
+	}
+	return &mission, nil
+}
+
+func queryAssets(db *gorm.DB, variables map[string]interface{}) ([]domain.Asset, error) {
+	var assets []domain.Asset
+	q := db.Order("created_at DESC")
+
+	if category, ok := variables["category"].(string); ok && category != "" {
+		q = q.Where("category = ?", category)
+	}
+
+	if err := q.Find(&assets).Error; err != nil {
+		log.Printf("[GQL] Failed to query assets: %v", err)
+		return nil, fmt.Errorf("failed to fetch assets")
+	}
+	return assets, nil
+}
+
+func queryAssetByID(db *gorm.DB, variables map[string]interface{}) (*domain.Asset, error) {
+	id, ok := variables["id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("id is required")
+	}
+
+	var asset domain.Asset
+	if err := db.First(&asset, "id = ?", id).Error; err != nil {
+		return nil, fmt.Errorf("asset not found")
+	}
+	return &asset, nil
+}
+
+func queryPilots(db *gorm.DB, variables map[string]interface{}) ([]domain.User, error) {
+	var users []domain.User
+	q := db.Order("name ASC")
+
+	if role, ok := variables["role"].(string); ok && role != "" {
+		q = q.Where("role = ?", role)
+	}
+
+	if err := q.Find(&users).Error; err != nil {
+		log.Printf("[GQL] Failed to query pilots: %v", err)
+		return nil, fmt.Errorf("failed to fetch pilots")
+	}
+	return users, nil
+}
+
+// ===================================================
+// MUTATION RESOLVERS
+// ===================================================
+
+func resolveMutations(query string, variables map[string]interface{}) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+	db := database.DB
+
+	if containsField(query, "createMission") {
+		mission, err := mutateCreateMission(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["createMission"] = mission
+	}
+
+	if containsField(query, "updateMissionStatus") {
+		mission, err := mutateUpdateMissionStatus(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["updateMissionStatus"] = mission
+	}
+
+	if containsField(query, "startMission") {
+		mission, err := mutateStartMission(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["startMission"] = mission
+	}
+
+	if containsField(query, "abortMission") {
+		mission, err := mutateAbortMission(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["abortMission"] = mission
+	}
+
+	if containsField(query, "deleteMission") {
+		ok, err := mutateDeleteMission(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["deleteMission"] = ok
+	}
+
+	if containsField(query, "submitPreFlightCheck") {
+		check, err := mutateSubmitPreFlight(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["submitPreFlightCheck"] = check
+	}
+
+	return result, nil
+}
+
+func mutateCreateMission(db *gorm.DB, variables map[string]interface{}) (*domain.Mission, error) {
+	input, ok := variables["input"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	assetID, err := uuid.Parse(fmt.Sprintf("%v", input["assetId"]))
+	if err != nil {
+		return nil, fmt.Errorf("invalid assetId")
+	}
+
+	pilotID, err := uuid.Parse(fmt.Sprintf("%v", input["pilotId"]))
+	if err != nil {
+		return nil, fmt.Errorf("invalid pilotId")
+	}
+
+	duration := 0
+	if d, ok := input["duration"].(float64); ok {
+		duration = int(d)
+	}
+
+	teamMemberIDs := "[]"
+	if t, ok := input["teamMemberIds"].(string); ok && t != "" {
+		teamMemberIDs = t
+	}
+
+	mission := domain.Mission{
+		MissionCode:   fmt.Sprintf("%v", input["missionCode"]),
+		Name:          fmt.Sprintf("%v", input["name"]),
+		Category:      fmt.Sprintf("%v", input["category"]),
+		AreaPolygon:   fmt.Sprintf("%v", input["areaPolygon"]),
+		Duration:      duration,
+		AssetID:       assetID,
+		PilotID:       pilotID,
+		TeamMemberIDs: teamMemberIDs,
+		Status:        "PENDING",
+	}
+
+	if err := db.Create(&mission).Error; err != nil {
+		log.Printf("[GQL] Failed to create mission: %v", err)
+		return nil, fmt.Errorf("failed to create mission")
+	}
+
+	// Reload with associations
+	db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", mission.ID)
+	return &mission, nil
+}
+
+func mutateUpdateMissionStatus(db *gorm.DB, variables map[string]interface{}) (*domain.Mission, error) {
+	id, ok := variables["id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("id is required")
+	}
+	status, ok := variables["status"].(string)
+	if !ok {
+		return nil, fmt.Errorf("status is required")
+	}
+
+	var mission domain.Mission
+	if err := db.First(&mission, "id = ?", id).Error; err != nil {
+		return nil, fmt.Errorf("mission not found")
+	}
+
+	mission.Status = status
+	db.Save(&mission)
+	db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", mission.ID)
+	return &mission, nil
+}
+
+func mutateStartMission(db *gorm.DB, variables map[string]interface{}) (*domain.Mission, error) {
+	id, ok := variables["id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("id is required")
+	}
+
+	var mission domain.Mission
+	if err := db.First(&mission, "id = ?", id).Error; err != nil {
+		return nil, fmt.Errorf("mission not found")
+	}
+
+	now := time.Now()
+	mission.Status = "LIVE"
+	mission.StartedAt = &now
+	db.Save(&mission)
+	db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", mission.ID)
+	return &mission, nil
+}
+
+func mutateAbortMission(db *gorm.DB, variables map[string]interface{}) (*domain.Mission, error) {
+	id, ok := variables["id"].(string)
+	if !ok {
+		return nil, fmt.Errorf("id is required")
+	}
+
+	var mission domain.Mission
+	if err := db.First(&mission, "id = ?", id).Error; err != nil {
+		return nil, fmt.Errorf("mission not found")
+	}
+
+	now := time.Now()
+	mission.Status = "ABORTED"
+	mission.EndedAt = &now
+	db.Save(&mission)
+	db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", mission.ID)
+	return &mission, nil
+}
+
+func mutateSubmitPreFlight(db *gorm.DB, variables map[string]interface{}) (*domain.PreFlightCheck, error) {
+	input, ok := variables["input"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	missionID, err := uuid.Parse(fmt.Sprintf("%v", input["missionId"]))
+	if err != nil {
+		return nil, fmt.Errorf("invalid missionId")
+	}
+
+	now := time.Now()
+	check := domain.PreFlightCheck{
+		MissionID:        missionID,
+		HullIntegrity:    boolVal(input["hullIntegrity"]),
+		SonarSystem:      boolVal(input["sonarSystem"]),
+		BatteryConn:      boolVal(input["batteryConn"]),
+		Thruster:         boolVal(input["thruster"]),
+		DepthSensor:      boolVal(input["depthSensor"]),
+		WaterproofSeals:  boolVal(input["waterproofSeals"]),
+		NavigationSystem: boolVal(input["navigationSystem"]),
+		Communication:    boolVal(input["communication"]),
+		VerifiedAt:       &now,
+	}
+
+	result := db.Where("mission_id = ?", missionID).FirstOrCreate(&check)
+	if result.Error != nil {
+		return nil, fmt.Errorf("failed to submit pre-flight check")
+	}
+
+	// If existed, update it
+	if result.RowsAffected == 0 {
+		db.Model(&check).Updates(check)
+	}
+
+	return &check, nil
+}
+
+func mutateDeleteMission(db *gorm.DB, variables map[string]interface{}) (bool, error) {
+	id, ok := variables["id"].(string)
+	if !ok {
+		return false, fmt.Errorf("id is required")
+	}
+
+	var mission domain.Mission
+	if err := db.First(&mission, "id = ?", id).Error; err != nil {
+		return false, fmt.Errorf("mission not found")
+	}
+
+	// Block deletion of live missions
+	if mission.Status == "LIVE" {
+		return false, fmt.Errorf("cannot delete a LIVE mission")
+	}
+
+	if err := db.Delete(&mission).Error; err != nil {
+		return false, fmt.Errorf("failed to delete mission: %v", err)
+	}
+	return true, nil
+}
+
+// ===================================================
+// HELPERS
+// ===================================================
+
+func containsField(query, field string) bool {
+	return strings.Contains(query, field)
+}
+
+func boolVal(v interface{}) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return false
+}

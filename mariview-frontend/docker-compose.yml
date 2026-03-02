@@ -1,0 +1,10 @@
+services:
+  # Frontend UI (React + Vite)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mariview-ui
+    ports:
+      - "3099:80"
+    restart: unless-stopped

@@ -1,0 +1,171 @@
+services:
+  # ============================================
+  # INFRASTRUCTURE LAYER
+  # ============================================
+
+  locallitix-postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: supersecretpassword
+      POSTGRES_MULTIPLE_DATABASES: locallitix_core,keycloak_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./core-backend/scripts/init-multiple-psql-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-psql-dbs.sh
+    networks:
+      - locallitix-net
+
+  locallitix-keycloak:
+    image: quay.io/keycloak/keycloak:22.0.5
+    command: start-dev --import-realm
+    volumes:
+      - ./core-backend/scripts/realm-export.json:/opt/keycloak/data/import/realm-export.json
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://locallitix-postgres:5432/keycloak_db
+      KC_DB_USERNAME: root
+      KC_DB_PASSWORD: supersecretpassword
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8081:8080"
+    depends_on:
+      - locallitix-postgres
+    networks:
+      - locallitix-net
+
+  locallitix-influxdb:
+    image: influxdb:2.7-alpine
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: supersecretpassword
+      DOCKER_INFLUXDB_INIT_ORG: locallitix
+      DOCKER_INFLUXDB_INIT_BUCKET: telemetry
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: locallitix-super-secret-token-123
+    ports:
+      - "8086:8086"
+    volumes:
+      - influx-data:/var/lib/influxdb2
+    networks:
+      - locallitix-net
+
+  locallitix-backbone:
+    image: nats:latest
+    command: ["-js", "-sd", "/data"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+    networks:
+      - locallitix-net
+
+  locallitix-video:
+    image: bluenviron/mediamtx:latest
+    ports:
+      - "8554:8554"
+      - "1935:1935"
+      - "8888:8888"
+    networks:
+      - locallitix-net
+
+  locallitix-minio:
+    image: minio/minio:latest
+    container_name: locallitix-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: komandan
+      MINIO_ROOT_PASSWORD: supersecretpassword
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    networks:
+      - locallitix-net
+
+  # ============================================
+  # APPLICATION LAYER
+  # ============================================
+
+  locallitix-core-api:
+    build:
+      context: ./core-backend
+      dockerfile: Dockerfile
+    depends_on:
+      - locallitix-backbone
+      - locallitix-postgres
+      - locallitix-influxdb
+      - locallitix-keycloak
+      - locallitix-minio
+    environment:
+      - DB_DSN=host=locallitix-postgres user=root password=supersecretpassword dbname=locallitix_core port=5432 sslmode=disable
+      - INFLUX_URL=http://locallitix-influxdb:8086
+      - INFLUX_TOKEN=locallitix-super-secret-token-123
+      - NATS_URL=nats://locallitix-backbone:4222
+      - KEYCLOAK_URL=http://locallitix-keycloak:8080/realms/locallitix/protocol/openid-connect/certs
+      - KEYCLOAK_TOKEN_URL=http://locallitix-keycloak:8080/realms/locallitix/protocol/openid-connect/token
+      - KEYCLOAK_ADMIN_URL=http://locallitix-keycloak:8080/admin/realms/locallitix
+      - KEYCLOAK_CLIENT_ID=chimp-platform
+      - KEYCLOAK_ADMIN_USER=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - MINIO_ENDPOINT=locallitix-minio:9000
+      - MINIO_ACCESS_KEY=komandan
+      - MINIO_SECRET_KEY=supersecretpassword
+      - COOKIE_DOMAIN=localhost
+      - COOKIE_SECURE=false
+      - CORS_ORIGIN=http://localhost:3000
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - locallitix-net
+
+  locallitix-ui:
+    build:
+      context: ./mariview-frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - locallitix-core-api
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    networks:
+      - locallitix-net
+
+  # ============================================
+  # AI / VISION LAYER
+  # ============================================
+
+  locallitix-ai-vision:
+    build:
+      context: ./workers/vision
+      dockerfile: Dockerfile
+    depends_on:
+      - locallitix-backbone
+      - locallitix-video
+    volumes:
+      - ./mariview-frontend/public/assets/raw_drone.mp4:/app/videos/raw_drone.mp4:ro
+    environment:
+      - NATS_URL=nats://locallitix-backbone:4222
+      - MEDIAMTX_RTSP_URL=rtsp://locallitix-video:8554/drone-cam
+      - VIDEO_PATH=/app/videos/raw_drone.mp4
+      - YOLO_MODEL=yolov8n.pt
+      - YOLO_CONF=0.35
+    restart: unless-stopped
+    networks:
+      - locallitix-net
+
+networks:
+  locallitix-net:
+    driver: bridge
+
+volumes:
+  nats-data:
+  pg-data:
+  influx-data:
+  minio-data:

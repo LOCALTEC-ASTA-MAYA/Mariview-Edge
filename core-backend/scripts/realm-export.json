@@ -1,0 +1,111 @@
+{
+  "id": "locallitix",
+  "realm": "locallitix",
+  "displayName": "Locallitix C4I Command Center",
+  "enabled": true,
+  "accessTokenLifespan": 604800,
+  "ssoSessionIdleTimeout": 604800,
+  "ssoSessionMaxLifespan": 604800,
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "COMMANDER",
+        "description": "Full access to HQ and mission creation (Super Admin)"
+      },
+      {
+        "name": "PILOT",
+        "description": "Field mission execution access (Edge Node)"
+      },
+      {
+        "name": "OPERATOR",
+        "description": "Dashboard telemetry monitoring access"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "chimp-platform",
+      "name": "Chimp Frontend SPA",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "webOrigins": [
+        "*"
+      ],
+      "redirectUris": [
+        "*"
+      ]
+    },
+    {
+      "clientId": "locallitix-core-api",
+      "name": "Golang Core Backend",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "bearerOnly": true
+    }
+  ],
+  "users": [
+    {
+      "username": "komandan",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Supreme",
+      "lastName": "Commander",
+      "email": "komandan@locallitix.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "komandan123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "COMMANDER"
+      ]
+    },
+    {
+      "username": "pilot_alpha",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Pilot",
+      "lastName": "Alpha",
+      "email": "pilot@locallitix.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "pilot123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "PILOT"
+      ]
+    },
+    {
+      "username": "operator_01",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Operator",
+      "lastName": "One",
+      "email": "operator@locallitix.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "operator123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "OPERATOR"
+      ]
+    }
+  ]
+}
