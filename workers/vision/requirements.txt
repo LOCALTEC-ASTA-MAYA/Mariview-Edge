@@ -1,7 +1,11 @@
 # AI Vision Worker Dependencies
-# Virtual Drone Simulator: OpenCV + YOLOv8 + NATS + Datalastic AIS
-nats-py>=2.6.0,<3.0.0
+# Virtual Drone Simulator: YOLOv8 + CLIP + NATS + Datalastic AIS
 ultralytics>=8.1.0
-opencv-python-headless>=4.8.0
-numpy>=1.24.0
-aiohttp>=3.9.0
+nats-py
+opencv-python
+numpy
+httpx
+torch
+torchvision
+transformers
+Pillow

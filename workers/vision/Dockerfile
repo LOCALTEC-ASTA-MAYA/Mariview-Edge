@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies first (leverage Docker cache)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --default-timeout=1000 --no-cache-dir -r requirements.txt
 
 # Pre-download YOLOv8 nano model so first run is instant
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"

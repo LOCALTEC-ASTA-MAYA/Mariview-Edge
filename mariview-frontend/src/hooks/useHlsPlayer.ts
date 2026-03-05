@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import Hls from 'hls.js';
 
 /**
@@ -28,6 +28,8 @@ export function useHlsPlayer(
 ) {
     const hlsInstanceRef = useRef<Hls | null>(null);
     const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const retryCountRef = useRef(0);
+    const maxRetries = 30; // 30 retries × 2s = 60s max wait
 
     useEffect(() => {
         // Don't attach if disabled or video element doesn't exist yet
@@ -44,67 +46,87 @@ export function useHlsPlayer(
             retryTimerRef.current = null;
         }
 
-        // If HLS.js is supported (Chrome, Firefox, Edge, etc.)
-        if (Hls.isSupported()) {
-            const hls = new Hls({
-                enableWorker: true,
-                lowLatencyMode: true,
-                liveSyncDurationCount: 3,
-                liveMaxLatencyDurationCount: 10,
-                maxBufferLength: 10,
-                maxMaxBufferLength: 30,
-                backBufferLength: 0,
-            });
+        function attachHls() {
+            // Re-check ref on each retry (async callback)
+            const video = videoRef.current;
+            if (!video) return;
 
-            hls.loadSource(hlsUrl);
-            hls.attachMedia(video);
+            // Clean up any previous instance
+            if (hlsInstanceRef.current) {
+                hlsInstanceRef.current.destroy();
+                hlsInstanceRef.current = null;
+            }
 
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                console.log('[HLS] Manifest parsed, starting playback');
-                video.play().catch(() => { });
-            });
+            // If HLS.js is supported (Chrome, Firefox, Edge, etc.)
+            if (Hls.isSupported()) {
+                const hls = new Hls({
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    liveSyncDurationCount: 3,
+                    liveMaxLatencyDurationCount: 5,
+                    maxLiveSyncPlaybackRate: 1,
+                    maxBufferLength: 10,
+                    maxMaxBufferLength: 30,
+                    backBufferLength: 0,
+                });
 
-            hls.on(Hls.Events.ERROR, (_event, data) => {
-                if (data.fatal) {
-                    switch (data.type) {
-                        case Hls.ErrorTypes.NETWORK_ERROR:
-                            console.warn('[HLS] Network error, retrying in 3s...');
-                            retryTimerRef.current = setTimeout(() => {
-                                hls.startLoad();
-                            }, 3000);
-                            break;
-                        case Hls.ErrorTypes.MEDIA_ERROR:
+                hls.loadSource(hlsUrl);
+                hls.attachMedia(video);
+
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    console.log('[HLS] Manifest parsed, starting playback');
+                    retryCountRef.current = 0; // Reset retry count on success
+                    video.play().catch(() => { });
+                });
+
+                hls.on(Hls.Events.ERROR, (_event, data) => {
+                    if (data.fatal) {
+                        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
                             console.warn('[HLS] Media error, recovering...');
                             hls.recoverMediaError();
-                            break;
-                        default:
-                            console.warn('[HLS] Fatal error, falling back to MP4');
-                            hls.destroy();
-                            video.src = fallbackSrc;
-                            video.play().catch(() => { });
-                            break;
+                        } else {
+                            // Network error or any other fatal error → destroy and retry
+                            retryCountRef.current += 1;
+                            if (retryCountRef.current <= maxRetries) {
+                                console.warn(`[HLS] Stream unavailable, retry ${retryCountRef.current}/${maxRetries} in 2s...`);
+                                hls.destroy();
+                                hlsInstanceRef.current = null;
+                                retryTimerRef.current = setTimeout(() => {
+                                    attachHls();
+                                }, 2000);
+                            } else {
+                                console.warn('[HLS] Max retries reached, falling back to MP4');
+                                hls.destroy();
+                                hlsInstanceRef.current = null;
+                                video.src = fallbackSrc;
+                                video.play().catch(() => { });
+                            }
+                        }
                     }
-                }
-            });
+                });
 
-            hlsInstanceRef.current = hls;
+                hlsInstanceRef.current = hls;
 
-            // Safari has native HLS support
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = hlsUrl;
-            video.addEventListener('loadedmetadata', () => {
+                // Safari has native HLS support
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = hlsUrl;
+                video.addEventListener('loadedmetadata', () => {
+                    video.play().catch(() => { });
+                });
+
+                // No HLS support — fallback to MP4
+            } else {
+                video.src = fallbackSrc;
                 video.play().catch(() => { });
-            });
-
-            // No HLS support — fallback to MP4
-        } else {
-            video.src = fallbackSrc;
-            video.play().catch(() => { });
+            }
         }
 
+        // Initial attach
+        attachHls();
+
         // Jump to live edge when tab regains focus (prevents fast-forward catch-up)
-        const handleVisibility = () => {
-            if (document.visibilityState === 'visible' && videoRef.current) {
+        const jumpToLiveEdge = () => {
+            if (videoRef.current) {
                 const v = videoRef.current;
                 // Force HLS to re-sync to live edge
                 if (hlsInstanceRef.current) {
@@ -118,11 +140,18 @@ export function useHlsPlayer(
                 v.play().catch(() => { });
             }
         };
+
+        const handleVisibility = () => {
+            if (document.visibilityState === 'visible') jumpToLiveEdge();
+        };
+
         document.addEventListener('visibilitychange', handleVisibility);
+        window.addEventListener('focus', jumpToLiveEdge);
 
         // Cleanup on unmount or when enabled/ref changes
         return () => {
             document.removeEventListener('visibilitychange', handleVisibility);
+            window.removeEventListener('focus', jumpToLiveEdge);
             if (retryTimerRef.current) {
                 clearTimeout(retryTimerRef.current);
                 retryTimerRef.current = null;

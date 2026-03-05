@@ -117,16 +117,27 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
     refetchQueries: [{ query: GET_MISSIONS }],
   });
 
+  // ── Wake drone engine on mount (IDLE → ACTIVE) — ONCE only ──
+  const hasStarted = useRef(false);
+  useEffect(() => {
+    if (hasStarted.current) return;
+    hasStarted.current = true;
+    fetch('/api/drone/start', { method: 'POST', credentials: 'include' })
+      .then(res => {
+        if (res.ok) console.log('🟢 Drone start command sent — engine will transition to ACTIVE');
+        else console.warn('Drone start response:', res.status);
+      })
+      .catch(err => console.warn('Drone start failed (non-blocking):', err));
+  }, []);
+
   // Video ready state — gates WebSocket data processing
   const [isVideoReady, setIsVideoReady] = useState(false);
-  const [isModalVideoReady, setIsModalVideoReady] = useState(false);
 
   // Live AI Vision WebSocket — only processes data when video is playing
   const { detections: liveDetections, lastFrame, isConnected: wsConnected, frameCount, telemetry: liveTelemetry, detectionHistory } = useVisionWebSocket(3000, isVideoReady);
 
-  // Video refs
+  // Single video ref — ONE player, CSS-expanded when fullscreen
   const sidebarVideoRef = useRef<HTMLVideoElement>(null);
-  const fullscreenVideoRef = useRef<HTMLVideoElement>(null);
 
   const [liveOperations, setLiveOperations] = useState([operationFromMission]);
   const [selectedDrone, setSelectedDrone] = useState(operationFromMission);
@@ -207,87 +218,44 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
   // End Flight Dialog States
   const [showEndFlightDialog, setShowEndFlightDialog] = useState(false);
   const [droneToEnd, setDroneToEnd] = useState<any>(null);
+  const [zoomedImg, setZoomedImg] = useState<string | null>(null);
 
 
-  // Sidebar HLS — always active
+  // Sidebar HLS — always active (single instance, CSS-expanded for fullscreen)
+  // Auto-retry: increment key every 2s if video isn't playing yet
+  const [hlsRetryKey, setHlsRetryKey] = useState(0);
+  useEffect(() => {
+    if (isVideoReady) return; // Stream is live, stop retrying
+    const timer = setInterval(() => {
+      setHlsRetryKey(k => k + 1);
+      console.log('[HLS] Video not ready — forcing reconnect...');
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [isVideoReady]);
+
   useHlsPlayer(sidebarVideoRef, true);
 
-  // Fullscreen HLS — lifecycle-aware: create/destroy when Dialog opens/closes
-  const fullscreenHlsRef = useRef<any>(null);
+  // ── Smart Auto-Landing Lifecycle ──
+  const [hasTakenOff, setHasTakenOff] = useState(false);
+  const [autoLandTriggered, setAutoLandTriggered] = useState(false);
   useEffect(() => {
-    if (!isVideoFullscreen) {
-      // Dialog closed → destroy HLS instance
-      if (fullscreenHlsRef.current) {
-        fullscreenHlsRef.current.destroy();
-        fullscreenHlsRef.current = null;
-      }
-      return;
+    const alt = liveTelemetry?.alt;
+    if (alt == null) return;
+
+    // Detect takeoff: altitude crosses 5m
+    if (!hasTakenOff && alt > 5) {
+      setHasTakenOff(true);
+      console.log('[LANDING] Takeoff detected — altitude:', alt.toFixed(1), 'm');
     }
 
-    let cancelled = false;
-
-    // Jump to live edge when tab regains focus (hoisted for cleanup access)
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && fullscreenVideoRef.current) {
-        const v = fullscreenVideoRef.current;
-        if (v.duration && isFinite(v.duration)) {
-          v.currentTime = v.duration;
-        }
-        v.play().catch(() => { });
-      }
-    };
-
-    const attachHls = async () => {
-      const { default: Hls } = await import('hls.js');
-      // Wait for Dialog to render and populate the ref
-      await new Promise(r => setTimeout(r, 200));
-      const video = fullscreenVideoRef.current;
-      if (!video || cancelled) return;
-
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: true,
-          liveSyncDurationCount: 3,
-          liveMaxLatencyDurationCount: 10,
-          maxBufferLength: 10,
-          maxMaxBufferLength: 30,
-          backBufferLength: 0,
-        });
-        hls.loadSource('http://localhost:8888/drone-cam/index.m3u8');
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(() => { });
-        });
-        hls.on(Hls.Events.ERROR, (_e: any, data: any) => {
-          if (data.fatal) {
-            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              setTimeout(() => hls.startLoad(), 3000);
-            } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              hls.recoverMediaError();
-            }
-          }
-        });
-        fullscreenHlsRef.current = hls;
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = 'http://localhost:8888/drone-cam/index.m3u8';
-        video.play().catch(() => { });
-      }
-
-      document.addEventListener('visibilitychange', handleVisibility);
-    };
-
-    attachHls();
-
-    return () => {
-      cancelled = true;
-      document.removeEventListener('visibilitychange', handleVisibility);
-      if (fullscreenHlsRef.current) {
-        fullscreenHlsRef.current.destroy();
-        fullscreenHlsRef.current = null;
-      }
-    };
-  }, [isVideoFullscreen]);
+    // Auto-landing trigger: altitude drops below 2m AFTER takeoff — ONE TIME ONLY
+    if (hasTakenOff && alt < 2 && !autoLandTriggered) {
+      console.log('[LANDING] ✈️ Auto-landing detected — altitude:', alt.toFixed(1), 'm');
+      setDroneToEnd(selectedDrone);
+      setShowEndFlightDialog(true);
+      setAutoLandTriggered(true); // Never auto-trigger again this session
+    }
+  }, [liveTelemetry?.alt, hasTakenOff, autoLandTriggered, selectedDrone]);
 
   // NOTE: Mock telemetry simulator REMOVED.
   // Real telemetry now comes from NATS TELEMETRY.drone.live → GraphQL.
@@ -322,18 +290,27 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
     if (!droneToEnd) return;
 
     try {
-      // Persist to DB: set mission status → COMPLETED
+      // 1. Persist to DB: set mission status → COMPLETED
       if (missionId) {
         await abortMissionMutation({ variables: { id: missionId } });
         console.log('✅ Mission status set to COMPLETED in DB');
       }
 
-      // Remove drone from live operations UI
+      // 2. Send NATS kill switch — stops the Python AI vision process
+      try {
+        await fetch('/api/drone/stop', { method: 'POST', credentials: 'include' });
+        console.log('✅ COMMAND.drone.stop sent — CPU will be released');
+      } catch (killErr) {
+        console.warn('Kill switch failed (non-blocking):', killErr);
+      }
+
+      // 3. Remove drone from live operations UI
       setLiveOperations(prev => prev.filter(d => d.id !== droneToEnd.id));
 
       // Close dialogs and reset
       setShowEndFlightDialog(false);
       setDroneToEnd(null);
+      setHasTakenOff(false);
 
       // Navigate to Mission History
       if (onEndFlightComplete) {
@@ -365,70 +342,6 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
         </div>
       </div>
 
-      {/* Fullscreen Video Modal — Dialog approach with lifecycle-managed HLS */}
-      <Dialog open={isVideoFullscreen} onOpenChange={setIsVideoFullscreen}>
-        <DialogContent className="max-w-4xl w-full p-0 bg-black border-none overflow-hidden aspect-video">
-          <VisuallyHidden>
-            <DialogTitle>Live Video Stream Fullscreen</DialogTitle>
-            <DialogDescription>
-              Fullscreen view of live drone video feed from {selectedDrone.droneName} with real-time telemetry overlay
-            </DialogDescription>
-          </VisuallyHidden>
-
-          <div className="relative w-full flex-1 flex flex-col">
-            {/* Header */}
-            <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between p-4 bg-gradient-to-b from-black/80 to-transparent">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-1 bg-black/60 px-3 py-1.5 rounded">
-                  <div className="w-2 h-2 bg-[#ef4444] rounded-full animate-pulse" />
-                  <span className="text-white text-sm font-semibold">LIVE</span>
-                </div>
-                <div>
-                  <p className="text-white font-semibold">{realMission?.asset?.name || selectedDrone.droneName}</p>
-                  <p className="text-white/60 text-sm">{realMission?.name || selectedDrone.mission}</p>
-                </div>
-              </div>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="bg-black/40 hover:bg-black/60 text-white"
-                onClick={() => setIsVideoFullscreen(false)}
-              >
-                <X className="w-5 h-5" />
-              </Button>
-            </div>
-
-            {/* Video + AI Overlay — fills entire dialog */}
-            <div className="relative flex-1 bg-black overflow-hidden">
-              <video
-                ref={fullscreenVideoRef}
-                autoPlay
-                muted
-                playsInline
-                onPlaying={() => setIsModalVideoReady(true)}
-                onWaiting={() => setIsModalVideoReady(false)}
-                className="absolute inset-0 w-full h-full object-contain"
-              />
-              {isModalVideoReady && (
-                <BoundingBoxOverlay
-                  detections={liveDetections}
-                  videoRef={fullscreenVideoRef}
-                  sourceResolution={lastFrame?.resolution || [1920, 1080]}
-                  className="z-10"
-                />
-              )}
-              {!isModalVideoReady && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
-                  <div className="flex flex-col items-center gap-3">
-                    <div className="w-8 h-8 border-2 border-[#21A68D]/30 border-t-[#21A68D] rounded-full animate-spin" />
-                    <span className="text-white/60 text-xs font-mono tracking-wider">BUFFERING STREAM...</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
@@ -528,7 +441,10 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                       <Maximize2 className="w-3.5 h-3.5 text-white/60" />
                     </Button>
                   </div>
-                  <div className="relative aspect-video bg-black rounded-xl overflow-hidden border border-white/10 shadow-2xl group">
+                  <div className={isVideoFullscreen
+                    ? 'fixed inset-0 z-[9999] w-screen h-screen bg-black flex items-center justify-center'
+                    : 'relative aspect-video bg-black rounded-xl overflow-hidden border border-white/10 shadow-2xl group'
+                  }>
                     <video
                       ref={sidebarVideoRef}
                       autoPlay
@@ -538,6 +454,15 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                       onWaiting={() => setIsVideoReady(false)}
                       className="w-full h-full object-cover scale-105"
                     />
+                    {/* Close button for expanded video */}
+                    {isVideoFullscreen && (
+                      <button
+                        onClick={() => setIsVideoFullscreen(false)}
+                        className="absolute top-4 right-4 z-[99999] text-white bg-black/50 p-4 rounded-full text-2xl hover:bg-black/70 transition-colors"
+                      >
+                        X
+                      </button>
+                    )}
                     {/* Only render bboxes when video is actually playing (not buffering) */}
                     {isVideoReady && (
                       <BoundingBoxOverlay
@@ -547,32 +472,7 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                         className="scale-105"
                       />
                     )}
-                    {/* Buffering overlay */}
-                    {!isVideoReady && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
-                        <div className="flex flex-col items-center gap-2">
-                          <div className="w-6 h-6 border-2 border-[#21A68D]/30 border-t-[#21A68D] rounded-full animate-spin" />
-                          <span className="text-white/60 text-[9px] font-mono tracking-wider">BUFFERING STREAM...</span>
-                        </div>
-                      </div>
-                    )}
-                    {/* Live overlay */}
-                    <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/60 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10">
-                      <div className="w-1.5 h-1.5 bg-[#ef4444] rounded-full animate-pulse shadow-[0_0_5px_rgba(239,68,68,0.5)]" />
-                      <span className="text-white text-[9px] font-black tracking-widest">LIVE</span>
-                    </div>
-                    {/* WS Status + Detection count */}
-                    <div className="absolute top-3 right-3 flex items-center gap-1.5">
-                      <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[8px] font-mono border ${wsConnected ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-red-500/10 text-red-400 border-red-500/30'}`}>
-                        <div className={`w-1.5 h-1.5 rounded-full ${wsConnected ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                        {wsConnected ? 'AI LINKED' : 'AI OFFLINE'}
-                      </div>
-                      {liveDetections.length > 0 && (
-                        <div className="bg-[#21A68D]/10 text-[#21A68D] px-1.5 py-0.5 rounded-full text-[8px] font-mono border border-[#21A68D]/30">
-                          {liveDetections.length} OBJ
-                        </div>
-                      )}
-                    </div>
+
                   </div>
                 </div>
 
@@ -638,7 +538,10 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
 
                               {/* Full-frame Snapshot */}
                               {det.snapshot_b64 && (
-                                <div className="relative aspect-video bg-black">
+                                <div
+                                  className="relative aspect-video bg-black cursor-pointer group/snap"
+                                  onClick={() => setZoomedImg(`data:image/jpeg;base64,${det.snapshot_b64}`)}
+                                >
                                   <img
                                     src={`data:image/jpeg;base64,${det.snapshot_b64}`}
                                     alt={det.class}
@@ -646,6 +549,9 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                                   />
                                   <div className="absolute top-2 right-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded text-[9px] font-bold tracking-wider border border-[#21A68D]/40">
                                     <span className="text-[#21A68D]">AI DETECTED</span>
+                                  </div>
+                                  <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/snap:opacity-100 transition-opacity bg-black/40">
+                                    <Maximize2 className="w-5 h-5 text-white" />
                                   </div>
                                 </div>
                               )}
@@ -1055,6 +961,14 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
       </div>
 
 
+
+      {/* Snapshot Zoom Modal */}
+      {zoomedImg && (
+        <div className="fixed inset-0 z-[10000] bg-black/90 flex items-center justify-center" onClick={() => setZoomedImg(null)}>
+          <img src={zoomedImg.startsWith('data:') ? zoomedImg : `data:image/jpeg;base64,${zoomedImg}`} className="max-w-[95%] max-h-[95%] object-contain" alt="Zoomed" onClick={(e) => e.stopPropagation()} />
+          <button className="absolute top-4 right-4 text-white text-4xl font-bold" onClick={() => setZoomedImg(null)}>&times;</button>
+        </div>
+      )}
 
     </div>
   );

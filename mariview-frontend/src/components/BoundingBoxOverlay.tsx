@@ -177,6 +177,19 @@ export default function BoundingBoxOverlay({
         draw();
     }, [detections, draw]);
 
+    // Auto-clear canvas when detections go stale (no new data within 500ms)
+    // This prevents old bounding boxes from ghosting on screen
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }, 500);
+        return () => clearTimeout(timer);
+    }, [detections]);
+
     // ResizeObserver — redraw when container resizes
     useEffect(() => {
         const container = containerRef.current;

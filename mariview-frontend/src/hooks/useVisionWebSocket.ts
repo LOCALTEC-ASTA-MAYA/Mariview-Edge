@@ -20,9 +20,11 @@ export interface AISData {
 }
 
 export interface VisionDetection {
+    track_id?: number;
     class: string;
     confidence: number;
     bbox: [number, number, number, number]; // [x_min, y_min, x_max, y_max]
+    status?: string; // PENDING | ANALYZED
     snapshot_b64?: string; // base64 JPEG crop of the detected object
     aisData?: AISData | null; // AIS correlation data (null = pending, undefined = not a vessel)
     estimatedGps?: { lat: number; lon: number }; // estimated GPS from bbox projection
@@ -142,13 +144,38 @@ export function useVisionWebSocket(staleTimeoutMs = 3000, enabled = true): UseVi
                 if (frame.telemetry) {
                     setTelemetry(frame.telemetry);
                 }
-                // Accumulate snapshot history (max 50)
-                const withSnapshots = (frame.detections || []).filter(d => d.snapshot_b64);
-                if (withSnapshots.length > 0) {
-                    setDetectionHistory(prev => [
-                        ...withSnapshots.map(d => ({ ...d, _ts: frame.timestamp } as VisionDetection)),
-                        ...prev,
-                    ].slice(0, 50));
+                // Upsert detectionHistory by track_id (deduplicate cards)
+                const incoming = frame.detections || [];
+                if (incoming.length > 0) {
+                    setDetectionHistory(prev => {
+                        const map = new Map<number, VisionDetection>();
+                        // Index existing entries by track_id
+                        for (const d of prev) {
+                            if (d.track_id != null) map.set(d.track_id, d);
+                        }
+                        // Upsert incoming detections
+                        for (const d of incoming) {
+                            if (d.track_id == null) continue;
+                            const existing = map.get(d.track_id);
+                            if (existing) {
+                                // Update fields but PRESERVE snapshot if incoming is empty
+                                map.set(d.track_id, {
+                                    ...existing,
+                                    class: d.class,
+                                    confidence: d.confidence,
+                                    bbox: d.bbox,
+                                    status: d.status,
+                                    aisData: d.aisData ?? existing.aisData,
+                                    estimatedGps: d.estimatedGps ?? existing.estimatedGps,
+                                    snapshot_b64: d.snapshot_b64 || existing.snapshot_b64,
+                                });
+                            } else {
+                                // New track_id
+                                map.set(d.track_id, { ...d });
+                            }
+                        }
+                        return Array.from(map.values()).slice(0, 50);
+                    });
                 }
                 resetStaleTimer();
             } catch (err) {

@@ -23,6 +23,7 @@ Environment Variables:
 
 import asyncio
 import base64
+import io
 import json
 import math
 import os
@@ -35,12 +36,16 @@ from datetime import datetime, timezone
 
 import cv2
 import numpy as np
+from PIL import Image
 
 try:
     import aiohttp
 except ImportError:
     aiohttp = None  # type: ignore
     print("[VDRONE] WARNING: aiohttp not installed — Datalastic AIS enrichment disabled")
+
+# CLIP candidate classes for zero-shot maritime classification
+CLIP_CANDIDATES = ["Yacht", "Sailboat", "Cargo Vessel", "Patrol Boat", "Speedboat", "Warship", "Floating Debris"]
 
 # ─────────────────────────────────────────────
 # Datalastic AIS Service
@@ -51,6 +56,25 @@ DATALASTIC_BASE_URL = "https://api.datalastic.com/api/v0"
 AIS_SEARCH_RADIUS_KM = 5  # search for vessels within 5km of estimated GPS
 AIS_CACHE_TTL = 60  # cache AIS results for 60 seconds
 AIS_RATE_LIMIT_SECS = 30  # max 1 API call per 30 seconds
+
+# ── Circuit Breaker / Demo Flag ──
+SIMULATE_API_DOWN = os.getenv("SIMULATE_API_DOWN", "false").lower() == "true"
+
+# KKP Demo fallback AIS payload (used when API is down or SIMULATE_API_DOWN=True)
+KKP_FALLBACK_AIS = {
+    "mmsi": "525000301",
+    "vesselName": "KN TANJUNG DATU 301",
+    "imo": "IMO999301",
+    "type": "Patrol Vessel",
+    "speed": 12.5,
+    "course": 220,
+    "length": 57,
+    "width": 8,
+    "draft": 2.8,
+    "destination": "SEA PATROL Z-1",
+    "eta": "",
+    "callSign": "PNAV7",
+}
 
 # Vessel-class labels that should trigger AIS enrichment
 VESSEL_CLASSES = {"cargo_vessel", "speedboat", "patrol_boat"}
@@ -81,7 +105,7 @@ class DatalasticService:
     async def fetch_nearby_vessels(self, lat: float, lon: float) -> list[dict]:
         """Fetch AIS vessels near (lat, lon) from Datalastic API.
         Returns cached results if available and fresh."""
-        if not DATALASTIC_API_KEY or aiohttp is None:
+        if not DATALASTIC_API_KEY or aiohttp is None or SIMULATE_API_DOWN:
             return []
 
         # Cache key: rounded to 3 decimal places (~111m precision)
@@ -108,13 +132,21 @@ class DatalasticService:
                 "longitude": str(lon),
                 "radius": str(AIS_SEARCH_RADIUS_KM),
             }
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                 if resp.status == 200:
                     body = await resp.json()
-                    vessels = body.get("data", [])
+                    # Safely parse response — data can be list or dict
+                    raw_data = body.get("data")
+                    vessels_list = []
+                    if isinstance(raw_data, list):
+                        vessels_list = raw_data
+                    elif isinstance(raw_data, dict):
+                        vessels_list = raw_data.get("vessels", [])
+                        if not isinstance(vessels_list, list):
+                            vessels_list = []
                     # Normalize to our format
                     result = []
-                    for v in vessels[:10]:  # cap at 10 nearest
+                    for v in vessels_list[:10]:  # cap at 10 nearest
                         result.append({
                             "mmsi": v.get("mmsi", ""),
                             "vesselName": v.get("name", "Unknown"),
@@ -227,8 +259,8 @@ async def enrich_detections_with_ais(
                 "callSign": best["callSign"],
             }
         else:
-            # No AIS data available — mark as pending
-            det["aisData"] = None
+            # Fallback: inject KKP demo AIS when real API unavailable
+            det["aisData"] = dict(KKP_FALLBACK_AIS)
 
     return detections
 
@@ -282,20 +314,31 @@ COCO_TO_MARITIME = {
 # ─────────────────────────────────────────────
 
 class TelemetryState:
-    """Simulates a drone flying a patrol route with highly realistic telemetry."""
+    """Simulates a drone flying a patrol route with video-time-synced telemetry.
+
+    Altitude phases (307s video):
+      Takeoff  (t < 30s):    0 → 120m
+      Cruising (30 ≤ t < 270): 120m ± 1.5m oscillation
+      Landing  (t ≥ 270s):   120m → 0m at t=307
+    """
+
+    VIDEO_DURATION = 307.0  # drone.mp4 is 5m07s
 
     def __init__(self):
         self.waypoint_idx = 0
         self.progress = 0.0  # 0..1 between current and next waypoint
         self.battery = 98.0
-        self.alt = 120.0
+        self.alt = 0.0
         self.heading = 145.0
-        self.speed = 15.5
+        self.speed = 0.0
         self.orbit_dist_km = 1.5
         self._start_time = time.time()
 
-    def tick(self, dt: float):
-        """Advance the drone state by dt seconds."""
+    def tick(self, dt: float, video_time: float = -1.0):
+        """Advance the drone state.
+        video_time: seconds into the video (drives altitude phases).
+        dt: elapsed real seconds (drives waypoint progress).
+        """
         # Move along patrol route
         self.progress += dt * 0.02  # ~50s per leg
         if self.progress >= 1.0:
@@ -313,13 +356,24 @@ class TelemetryState:
         dlon = wp_b[1] - wp_a[1]
         self.heading = (math.degrees(math.atan2(dlon, dlat)) + 360) % 360
 
-        # Smooth, tight oscillations matching user spec
-        t = time.time()
-        # Altitude: 118.0 – 122.0m (smooth sine wave + micro-jitter)
-        self.alt = 120.0 + math.sin(t * 0.15) * 2.0 + random.uniform(-0.3, 0.3)
-        # Speed: 14.5 – 16.5 m/s
-        self.speed = 15.5 + math.sin(t * 0.2) * 1.0 + random.uniform(-0.2, 0.2)
-        # Battery: starts at 98%, drains ~0.01% per second (very slow)
+        t = video_time if video_time >= 0 else (time.time() - self._start_time)
+
+        # ── Phase-based altitude (synchronized to video time) ──
+        if t < 30:
+            # Takeoff: climb from 0 to 120m
+            self.alt = (t / 30.0) * 120.0
+            self.speed = 5.0 + (t / 30.0) * 10.5  # accelerate during takeoff
+        elif t < 270:
+            # Cruising: hold at 120m with subtle oscillation
+            self.alt = 120.0 + math.sin(t * 0.15) * 1.5
+            self.speed = 15.5 + math.sin(t * 0.2) * 1.0 + random.uniform(-0.2, 0.2)
+        else:
+            # Landing: descend from 120 to 0 over 37 seconds
+            landing_progress = (t - 270.0) / 37.0
+            self.alt = max(0.0, 120.0 * (1.0 - landing_progress))
+            self.speed = max(0.0, 15.5 * (1.0 - landing_progress))
+
+        # Battery: starts at 98%, drains ~0.01% per second
         self.battery -= dt * 0.01
         if self.battery < 15:
             self.battery = 98.0  # simulate battery swap
@@ -378,126 +432,267 @@ def start_ffmpeg(width: int, height: int, fps: float) -> subprocess.Popen:
     )
     return proc
 
-
 # ─────────────────────────────────────────────
-# Detection → NATS payload adapter
+# Async Tracking Pipeline: Cache, Queue & Worker
 # ─────────────────────────────────────────────
 
-# Snapshot cache: send a FULL FRAME snapshot for active detections, re-encode every 10s.
-# { class_name: { "b64": str, "time": float } }
-_snapshot_cache: dict[str, dict] = {}
+# TRACKING_CACHE: {track_id: {class_name, maritime_cls, confidence, bbox, aisData, status, snapshot_b64, last_seen_frame}}
+TRACKING_CACHE: dict[int, dict] = {}
+VISUAL_HUD_CACHE: dict[int, dict] = {}  # Separate cache for HUD rendering
+analysis_queue: asyncio.Queue | None = None  # initialized per mission
+_snapshot_taken: set[int] = set()  # One-shot full-frame snapshot tracker
 
-SNAPSHOT_COOLDOWN = 10  # seconds between re-encoding the same class
-SNAPSHOT_MAX_WIDTH = 640  # resize full frame to save bandwidth
-
-# Dummy AIS data pool for vessel detections (used when no real Datalastic key)
-_DUMMY_AIS_POOL = [
-    {
-        "mmsi": "477123456", "vesselName": "MV OCEANIC SPIRIT", "imo": "IMO9234567",
-        "type": "Container Ship", "speed": 8.5, "course": 145, "length": 294,
-        "width": 32, "draft": 12.5, "destination": "Jakarta Port",
-        "eta": "2025-01-20 16:00", "callSign": "VRXY2",
-    },
-    {
-        "mmsi": "477567890", "vesselName": "HAPAG-LLOYD EXPRESS", "imo": "IMO9456789",
-        "type": "Bulk Carrier", "speed": 12.8, "course": 90, "length": 334,
-        "width": 48, "draft": 14.5, "destination": "Rotterdam",
-        "eta": "2025-02-05 18:00", "callSign": "VRHL4",
-    },
-    {
-        "mmsi": "412345678", "vesselName": "KRI BUNG TOMO", "imo": "IMO8801234",
-        "type": "Patrol Vessel", "speed": 18.2, "course": 220, "length": 57,
-        "width": 8, "draft": 2.8, "destination": "Kupang Naval Base",
-        "eta": "2025-01-19 09:30", "callSign": "PNAV7",
-    },
-    {
-        "mmsi": "525009876", "vesselName": "PELNI KELUD", "imo": "IMO9012345",
-        "type": "Passenger/Cargo", "speed": 15.0, "course": 310, "length": 146,
-        "width": 23, "draft": 5.9, "destination": "Surabaya",
-        "eta": "2025-01-21 14:00", "callSign": "YBLK2",
-    },
-]
+SNAPSHOT_MAX_WIDTH = 1024  # full-frame snapshot max width (HD)
 
 
-def results_to_payload(results, frame: np.ndarray, frame_id: int, frame_w: int, frame_h: int) -> dict:
-    """Convert YOLOv8 Results to the VISION.ai.raw payload format.
-    Sends FULL FRAME snapshots (not bbox crops) and injects dummy AIS for vessels."""
-    detections = []
-    if results and len(results) > 0:
-        boxes = results[0].boxes
-        if boxes is not None:
-            for i in range(len(boxes)):
-                cls_id = int(boxes.cls[i].item())
-                cls_name = results[0].names.get(cls_id, "unknown")
-                conf = float(boxes.conf[i].item())
-                x1, y1, x2, y2 = [int(v) for v in boxes.xyxy[i].tolist()]
+async def api_worker(ais_service: "DatalasticService", telemetry: "TelemetryState",
+                     queue: asyncio.Queue, clip_model, clip_processor, device: str):
+    """Background worker: Local CLIP classification + Datalastic AIS enrichment.
+    Updates TRACKING_CACHE in-place — zero blocking on main video loop."""
+    while True:
+        try:
+            track_id, maritime_cls, crop_b64, frame_w, frame_h = await queue.get()
+        except asyncio.CancelledError:
+            break
 
-                # Map COCO class to maritime class
-                maritime_cls = COCO_TO_MARITIME.get(cls_name, cls_name)
+        try:
+            # ────────────────────────────────────────────────
+            # STEP 1: Local CLIP Zero-Shot Classification
+            # ────────────────────────────────────────────────
+            classified_name = maritime_cls  # fallback if CLIP fails
 
-                # Refresh FULL FRAME snapshot in cache every SNAPSHOT_COOLDOWN seconds
-                now = time.time()
-                cached = _snapshot_cache.get(maritime_cls)
-                if cached is None or (now - cached["time"]) > SNAPSHOT_COOLDOWN:
-                    try:
-                        # Resize full frame to save bandwidth
-                        scale = SNAPSHOT_MAX_WIDTH / frame_w
-                        resized = cv2.resize(frame, (SNAPSHOT_MAX_WIDTH, int(frame_h * scale))).copy()
+            if crop_b64:
+                try:
+                    image = Image.open(io.BytesIO(base64.b64decode(crop_b64))).convert("RGB")
+                    inputs = clip_processor(
+                        text=CLIP_CANDIDATES, images=image,
+                        return_tensors="pt", padding=True
+                    )
+                    # Move tensors to device
+                    import torch
+                    inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
 
-                        # Draw bounding box on the resized frame
-                        sx1, sy1 = int(x1 * scale), int(y1 * scale)
-                        sx2, sy2 = int(x2 * scale), int(y2 * scale)
-                        color = (0, 255, 0)  # green BGR
-                        cv2.rectangle(resized, (sx1, sy1), (sx2, sy2), color, 2)
+                    with torch.no_grad():
+                        outputs = clip_model(**inputs)
 
-                        # Draw label + confidence above the box
-                        label = f"{maritime_cls} {conf:.0%}"
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        font_scale, thickness = 0.45, 1
-                        (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
-                        # Filled background for readability
-                        cv2.rectangle(resized, (sx1, sy1 - th - 6), (sx1 + tw + 4, sy1), color, -1)
-                        cv2.putText(resized, label, (sx1 + 2, sy1 - 4), font, font_scale, (0, 0, 0), thickness)
+                    logits = outputs.logits_per_image  # shape: [1, len(CLIP_CANDIDATES)]
+                    probs = logits.softmax(dim=-1)
+                    best_idx = probs.argmax().item()
+                    best_prob = probs[0, best_idx].item()
+                    classified_name = CLIP_CANDIDATES[best_idx]
+                    print(f"[CLIP] Track #{track_id} → {classified_name} ({best_prob:.1%})")
+                except Exception as e:
+                    print(f"[CLIP] Classification failed for track #{track_id}: {e}")
 
-                        _, buf = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 55])
-                        b64 = base64.b64encode(buf.tobytes()).decode('ascii')
-                        _snapshot_cache[maritime_cls] = {"b64": b64, "time": now}
-                    except Exception:
-                        pass  # keep old cache on error
+            # ────────────────────────────────────────────────
+            # STEP 2: Datalastic AIS enrichment
+            # ────────────────────────────────────────────────
+            telem_snap = telemetry.tick(0, video_time=-1)
+            drone_lat, drone_lon, drone_alt = telem_snap["lat"], telem_snap["lon"], telem_snap["alt"]
 
-                # Build detection payload
-                det: dict = {
-                    "class": maritime_cls,
-                    "confidence": round(conf, 4),
-                    "bbox": [x1, y1, x2, y2],
+            cached_entry = TRACKING_CACHE.get(track_id)
+            if cached_entry and cached_entry.get("bbox"):
+                est_gps = estimate_detection_gps(
+                    cached_entry["bbox"], frame_w, frame_h,
+                    drone_lat, drone_lon, drone_alt,
+                )
+            else:
+                est_gps = {"lat": drone_lat, "lon": drone_lon}
+
+            # Fetch AIS (works if API key exists; falls back to KKP demo AIS otherwise)
+            nearby = await ais_service.fetch_nearby_vessels(est_gps["lat"], est_gps["lon"])
+            if nearby:
+                best = min(nearby, key=lambda v: (
+                    (v["lat"] - est_gps["lat"]) ** 2 + (v["lon"] - est_gps["lon"]) ** 2
+                ))
+                ais_data = {
+                    "mmsi": best["mmsi"],
+                    "vesselName": best["vesselName"],
+                    "imo": best["imo"],
+                    "type": best["type"],
+                    "speed": best["speed"],
+                    "course": best["course"],
+                    "length": best["length"],
+                    "width": best.get("width", 0),
+                    "draft": best["draft"],
+                    "destination": best["destination"],
+                    "eta": best["eta"],
+                    "callSign": best["callSign"],
                 }
+            else:
+                ais_data = dict(KKP_FALLBACK_AIS)
 
-                # ALWAYS attach the cached snapshot (never empty for known classes)
-                cached = _snapshot_cache.get(maritime_cls)
-                if cached:
-                    det["snapshot_b64"] = cached["b64"]
+            # ── Update cache in-place ──
+            if track_id in TRACKING_CACHE:
+                TRACKING_CACHE[track_id].update({
+                    "class_name": classified_name,
+                    "aisData": ais_data,
+                    "estimatedGps": est_gps,
+                    "status": "ANALYZED",
+                })
+                print(f"[WORKER] Track #{track_id} → {classified_name} | MMSI: {ais_data.get('mmsi', 'N/A')} ✓")
 
-                # Inject dummy AIS data for vessel-class detections
-                if maritime_cls in VESSEL_CLASSES:
-                    # Deterministic pick based on class name so same class gets same vessel
-                    ais_idx = hash(maritime_cls) % len(_DUMMY_AIS_POOL)
-                    det["aisData"] = dict(_DUMMY_AIS_POOL[ais_idx])  # copy to avoid mutation
+        except Exception as e:
+            print(f"[WORKER] Error processing track #{track_id}: {e}")
+            if track_id in TRACKING_CACHE:
+                TRACKING_CACHE[track_id]["status"] = "ERROR"
+        finally:
+            queue.task_done()
 
-                detections.append(det)
+
+# ─────────────────────────────────────────────
+# Military HUD renderer (draws from active visuals list)
+# ─────────────────────────────────────────────
+
+# Per-class color map (BGR)
+_HUD_COLORS: dict[str, tuple[int, int, int]] = {
+    "cargo_vessel":    (0, 230, 118),   # green
+    "speedboat":       (230, 216, 0),   # cyan-ish
+    "patrol_boat":     (0, 180, 255),   # amber
+    "person_on_deck":  (80, 127, 255),  # coral
+    "floating_debris": (180, 180, 180), # silver
+}
+_HUD_DEFAULT_COLOR = (200, 200, 200)
+
+
+def draw_hud_from_cache(frame: np.ndarray, active_visuals: list[dict]) -> np.ndarray:
+    """Draw military HUD-style bounding boxes ONLY for objects actively seen THIS frame.
+    Pulls enrichment data (class_name, MMSI) from TRACKING_CACHE if ANALYZED."""
+    annotated = frame.copy()
+    if not active_visuals:
+        return annotated
+
+    overlay = annotated.copy()
+
+    for vis in active_visuals:
+        track_id = vis["id"]
+        x1, y1, x2, y2 = vis["bbox"]
+        conf = vis["conf"]
+        maritime_cls = vis["maritime_cls"]
+
+        # Pull enrichment from cache
+        cache_entry = TRACKING_CACHE.get(track_id, {})
+        status = cache_entry.get("status", "PENDING")
+
+        color = _HUD_COLORS.get(maritime_cls, _HUD_DEFAULT_COLOR)
+        w, h = x2 - x1, y2 - y1
+        bracket_len = max(12, min(w, h) // 4)
+        thick = 2
+
+        # ── Semi-transparent fill (20% opacity) ──
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+
+        # ── Corner reticle brackets ──
+        cv2.line(annotated, (x1, y1), (x1 + bracket_len, y1), color, thick, cv2.LINE_AA)
+        cv2.line(annotated, (x1, y1), (x1, y1 + bracket_len), color, thick, cv2.LINE_AA)
+        cv2.line(annotated, (x2, y1), (x2 - bracket_len, y1), color, thick, cv2.LINE_AA)
+        cv2.line(annotated, (x2, y1), (x2, y1 + bracket_len), color, thick, cv2.LINE_AA)
+        cv2.line(annotated, (x1, y2), (x1 + bracket_len, y2), color, thick, cv2.LINE_AA)
+        cv2.line(annotated, (x1, y2), (x1, y2 - bracket_len), color, thick, cv2.LINE_AA)
+        cv2.line(annotated, (x2, y2), (x2 - bracket_len, y2), color, thick, cv2.LINE_AA)
+        cv2.line(annotated, (x2, y2), (x2, y2 - bracket_len), color, thick, cv2.LINE_AA)
+
+        # ── Alpha blend ──
+        cv2.addWeighted(overlay, 0.20, annotated, 0.80, 0, annotated)
+        overlay = annotated.copy()
+
+        # ── Label: [ID: N] CLASS | MMSI ──
+        if status == "ANALYZED":
+            ais = cache_entry.get("aisData", {})
+            label = f"[ID:{track_id}] {cache_entry.get('class_name', maritime_cls).upper()} {conf:.0%}"
+            mmsi_line = f"MMSI: {ais.get('mmsi', 'N/A')} | {ais.get('vesselName', '')}"
+        elif status == "PENDING":
+            label = f"[ID:{track_id}] DETECTING... {conf:.0%}"
+            mmsi_line = "MMSI: FETCHING..."
+        else:
+            label = f"[ID:{track_id}] {maritime_cls.upper()} {conf:.0%}"
+            mmsi_line = ""
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale, font_thick = 0.45, 1
+        pad = 4
+
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, font_thick)
+        label_x, label_y = x1, y1 - 6
+
+        lbl_overlay = annotated.copy()
+        label_h = th + pad * 2
+        if mmsi_line:
+            (tw2, th2), _ = cv2.getTextSize(mmsi_line, font, font_scale * 0.85, font_thick)
+            label_h += th2 + pad
+            tw = max(tw, tw2)
+
+        cv2.rectangle(lbl_overlay,
+                      (label_x - 1, label_y - th - pad),
+                      (label_x + tw + pad * 2, label_y - th - pad + label_h),
+                      (30, 30, 30), -1)
+        cv2.addWeighted(lbl_overlay, 0.70, annotated, 0.30, 0, annotated)
+
+        cv2.putText(annotated, label,
+                    (label_x + pad, label_y),
+                    font, font_scale, (255, 255, 255), font_thick, cv2.LINE_AA)
+
+        if mmsi_line:
+            cv2.putText(annotated, mmsi_line,
+                        (label_x + pad, label_y + th + pad),
+                        font, font_scale * 0.85, (180, 220, 255), font_thick, cv2.LINE_AA)
+
+        cv2.line(annotated,
+                 (label_x - 1, label_y - th - pad + label_h),
+                 (label_x + tw + pad * 2, label_y - th - pad + label_h),
+                 color, 1, cv2.LINE_AA)
+
+    return annotated
+
+
+# ─────────────────────────────────────────────
+def tracking_cache_to_payload(frame_id: int, frame_w: int, frame_h: int) -> dict:
+    """Build VISION.ai.raw NATS payload from TRACKING_CACHE.
+    Snapshots are full-frame HD images stored at capture time."""
+    detections = []
+
+    for track_id, entry in TRACKING_CACHE.items():
+        bbox = entry.get("bbox")
+        if bbox is None:
+            continue
+
+        det: dict = {
+            "track_id": track_id,
+            "class": entry.get("maritime_cls", "unknown"),
+            "confidence": entry.get("confidence", 0.0),
+            "bbox": bbox,
+            "status": entry.get("status", "PENDING"),
+        }
+
+        # AIS data (filled by worker when ANALYZED)
+        if entry.get("aisData"):
+            det["aisData"] = entry["aisData"]
+        if entry.get("estimatedGps"):
+            det["estimatedGps"] = entry["estimatedGps"]
+
+        # Full-frame HUD snapshot (stored in cache at capture time)
+        # Send exactly ONCE to NATS, then purge from cache to prevent spam
+        if entry.get("snapshot_b64"):
+            det["snapshot_b64"] = entry["snapshot_b64"]
+            entry["snapshot_b64"] = None
+
+        detections.append(det)
 
     return {
         "camera_id": "drone-cam-pyrhos-x1",
         "frame_id": frame_id,
         "resolution": [frame_w, frame_h],
-        "model": f"yolov8-maritime ({YOLO_MODEL})",
-        "inference_ms": 0,  # filled in after inference
+        "model": f"yolov8-tracking+clip ({YOLO_MODEL})",
+        "inference_ms": 0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "detections": detections,
     }
 
 
+
+
 # ─────────────────────────────────────────────
-# Main Loop
+# Main Loop — Stateful Engine (IDLE / ACTIVE)
 # ─────────────────────────────────────────────
 
 async def main():
@@ -505,7 +700,7 @@ async def main():
     from nats.errors import ConnectionClosedError, NoServersError
 
     print("=" * 60)
-    print("  LOCALLITIX Virtual Drone Simulator")
+    print("  LOCALLITIX Virtual Drone Simulator — Stateful Engine")
     print("=" * 60)
     print(f"  Video:     {VIDEO_PATH}")
     print(f"  Model:     {YOLO_MODEL} (conf={YOLO_CONF})")
@@ -514,29 +709,25 @@ async def main():
     print(f"  Drone:     {DRONE_NAME} ({DRONE_TYPE})")
     print("=" * 60)
 
-    # ── Load YOLOv8 ──────────────────────────
-    from ultralytics import YOLO
-    print(f"[VDRONE] Loading YOLOv8 model: {YOLO_MODEL} ...")
-    model = YOLO(YOLO_MODEL)
-    print(f"[VDRONE] Model loaded. Classes: {len(model.names)}")
+    # ── Helper: broadcast AI lifecycle status to NATS ──
+    async def broadcast_status(nc_conn, status: str, message: str, progress: int = 0):
+        """Publish AI lifecycle state to SYSTEM.ai.status for backend gatekeeper."""
+        payload = json.dumps({
+            "status": status,
+            "message": message,
+            "progress": progress,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }).encode()
+        try:
+            await nc_conn.publish("SYSTEM.ai.status", payload)
+            print(f"[STATUS] {status} ({progress}%): {message}")
+        except Exception as e:
+            print(f"[STATUS] Failed to broadcast: {e}")
 
-    # ── Open video ───────────────────────────
-    if not os.path.exists(VIDEO_PATH):
-        print(f"[VDRONE] FATAL: Video file not found: {VIDEO_PATH}")
-        sys.exit(1)
+    # ── Connect to NATS early (needed for status broadcasts during boot) ──
+    import nats
+    from nats.errors import ConnectionClosedError, NoServersError
 
-    cap = cv2.VideoCapture(VIDEO_PATH)
-    if not cap.isOpened():
-        print(f"[VDRONE] FATAL: Cannot open video: {VIDEO_PATH}")
-        sys.exit(1)
-
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f"[VDRONE] Video: {width}x{height} @ {fps:.1f} FPS ({total_frames} frames)")
-
-    # ── Connect to NATS ──────────────────────
     nc = None
     for attempt in range(1, 31):
         try:
@@ -553,126 +744,358 @@ async def main():
 
     js = nc.jetstream()
 
-    # ── Start FFmpeg ─────────────────────────
-    ffmpeg_proc = start_ffmpeg(width, height, fps)
-    print(f"[VDRONE] FFmpeg started (PID: {ffmpeg_proc.pid})")
+    # ── Load YOLOv8 with dynamic device selection ──
+    await broadcast_status(nc, "BOOTING", "Initializing Engine...", 10)
+    import torch
+    from ultralytics import YOLO
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"[VDRONE] Device: {device.upper()} ({'GPU accelerated' if device == 'cuda' else 'CPU mode'})")
+    await broadcast_status(nc, "BOOTING", "Loading YOLOv8 Vision...", 40)
+    print(f"[VDRONE] Loading YOLOv8 model: {YOLO_MODEL} ...")
+    model = YOLO(YOLO_MODEL).to(device)
+    print(f"[VDRONE] YOLO loaded on {device.upper()}. Classes: {len(model.names)}")
 
-    # ── State ─────────────────────────────
-    telemetry = TelemetryState()
+    # ── Load CLIP model for zero-shot classification ──
+    await broadcast_status(nc, "BOOTING", "Loading CLIP Model (600MB)...", 80)
+    from transformers import CLIPProcessor, CLIPModel
+    clip_model_name = "openai/clip-vit-base-patch32"
+    print(f"[VDRONE] Loading CLIP model: {clip_model_name} ...")
+    clip_model = CLIPModel.from_pretrained(clip_model_name).to(device)
+    clip_processor = CLIPProcessor.from_pretrained(clip_model_name)
+    clip_model.eval()
+    print(f"[VDRONE] CLIP loaded on {device.upper()}. Candidates: {CLIP_CANDIDATES}")
+
+    # ── Verify video file exists ──
+    if not os.path.exists(VIDEO_PATH):
+        print(f"[VDRONE] FATAL: Video file not found: {VIDEO_PATH}")
+        sys.exit(1)
+
+    # Probe video dimensions once (needed for FFmpeg)
+    probe_cap = cv2.VideoCapture(VIDEO_PATH)
+    if not probe_cap.isOpened():
+        print(f"[VDRONE] FATAL: Cannot open video: {VIDEO_PATH}")
+        sys.exit(1)
+    width = int(probe_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(probe_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = probe_cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(probe_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    probe_cap.release()
+    print(f"[VDRONE] Video: {width}x{height} @ {fps:.1f} FPS ({total_frames} frames)")
+
+    frame_interval = 1.0 / fps
     ais_service = DatalasticService()
-    if DATALASTIC_API_KEY:
+
+    if DATALASTIC_API_KEY and not SIMULATE_API_DOWN:
         print(f"[VDRONE] Datalastic AIS enrichment ENABLED (key={DATALASTIC_API_KEY[:8]}...)")
+    elif SIMULATE_API_DOWN:
+        print("[VDRONE] Datalastic AIS: SIMULATE_API_DOWN=True → using KKP fallback")
     else:
         print("[VDRONE] Datalastic AIS enrichment DISABLED (no DATALASTIC_API_KEY)")
-    frame_id = 0
-    total_detections = 0
-    last_nats_publish = 0.0
-    last_telemetry_publish = 0.0
-    frame_interval = 1.0 / fps
 
-    # ── Graceful shutdown ────────────────────
-    shutdown = asyncio.Event()
+    # ── Process-level shutdown (SIGINT / SIGTERM exits entire process) ──
+    process_shutdown = asyncio.Event()
 
     def signal_handler():
-        print("\n[VDRONE] Shutting down...")
-        shutdown.set()
+        print("\n[VDRONE] SIGINT/SIGTERM — exiting process...")
+        process_shutdown.set()
 
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, signal_handler)
 
-    print(f"[VDRONE] Starting processing loop...")
+    # ── State Machine Events ──
+    start_event = asyncio.Event()   # Set when COMMAND.drone.start received
+    stop_event = asyncio.Event()    # Set when COMMAND.drone.stop received
+    engine_active = False           # True while processing loop is running
+
+    async def handle_start_command(msg):
+        nonlocal engine_active
+        if engine_active:
+            print("[VDRONE] ⚠️ Engine already ACTIVE — ignoring duplicate start command")
+            return
+        print("[VDRONE] 🟢 COMMAND.drone.start received — launching mission...")
+        stop_event.clear()
+        start_event.set()
+
+    async def handle_stop_command(msg):
+        print("[VDRONE] ⛔ COMMAND.drone.stop received — returning to IDLE...")
+        start_event.clear()
+        stop_event.set()
+
+    await nc.subscribe("COMMAND.drone.start", cb=handle_start_command)
+    await nc.subscribe("COMMAND.drone.stop", cb=handle_stop_command)
+    print("[VDRONE] Subscribed to COMMAND.drone.start / COMMAND.drone.stop")
+
+    # ══════════════════════════════════════════════
+    #  OUTER LOOP: IDLE → wait for start → ACTIVE → back to IDLE
+    # ══════════════════════════════════════════════
 
     try:
-        while not shutdown.is_set():
-            t_start = time.monotonic()
+        while not process_shutdown.is_set():
+            # ── IDLE STATE ──
+            await broadcast_status(nc, "IDLE", "System Ready for Mission", 100)
+            print("\n[VDRONE] 💤 Engine IDLE — waiting for COMMAND.drone.start ...")
+            start_event.clear()
+            stop_event.clear()
 
-            # Read frame (loop on EOF)
-            ret, frame = cap.read()
-            if not ret:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret, frame = cap.read()
-                if not ret:
-                    print("[VDRONE] Cannot re-read video, exiting")
-                    break
+            # Wait for either start command or process shutdown
+            while not process_shutdown.is_set() and not start_event.is_set():
+                await asyncio.sleep(0.25)
 
-            frame_id += 1
+            if process_shutdown.is_set():
+                break
 
-            # ── YOLOv8 Inference ─────────────
-            t_inf = time.monotonic()
-            results = model(frame, conf=YOLO_CONF, verbose=False)
-            inference_ms = round((time.monotonic() - t_inf) * 1000, 1)
+            # ── TRANSITION TO ACTIVE ──
+            engine_active = True
+            await broadcast_status(nc, "ACTIVE", "Mission in Progress", 100)
+            print("[VDRONE] 🚀 Transitioning to ACTIVE state...")
 
-            # ── Draw annotated frame ─────────
-            annotated = results[0].plot() if results and len(results) > 0 else frame
+            # Start FFmpeg FIRST so HLS player can buffer
+            ffmpeg_proc = start_ffmpeg(width, height, fps)
+            print(f"[VDRONE] FFmpeg started (PID: {ffmpeg_proc.pid})")
 
-            # ── Pipe to FFmpeg (RTSP) ────────
+            # Warmup: give FFmpeg + HLS player 3.5s to buffer before sending telemetry/video
+            print("[VDRONE] ⏳ Warming up pipeline (3.5s) — syncing video + telemetry...")
+            await asyncio.sleep(3.5)
+
+            # Reset all state for a fresh mission
+            telemetry = TelemetryState()
+            TRACKING_CACHE.clear()
+            VISUAL_HUD_CACHE.clear()
+            _snapshot_taken.clear()
+            frame_id = 0
+            total_detections = 0
+            last_nats_publish = 0.0
+            last_telemetry_publish = 0.0
+
+            # Create fresh analysis queue and start background api_worker
+            mission_queue = asyncio.Queue()
+            worker_task = asyncio.create_task(
+                api_worker(ais_service, telemetry, mission_queue,
+                           clip_model, clip_processor, device)
+            )
+
+            # Open video from frame 0
+            cap = cv2.VideoCapture(VIDEO_PATH)
+            if not cap.isOpened():
+                print(f"[VDRONE] ERROR: Cannot open video: {VIDEO_PATH}")
+                engine_active = False
+                continue  # back to IDLE
+
+            print(f"[VDRONE] ▶ ACTIVE — processing {total_frames} frames at {fps:.1f} fps...")
+
+            # ── ACTIVE PROCESSING LOOP ──
             try:
-                ffmpeg_proc.stdin.write(annotated.tobytes())
-            except BrokenPipeError:
-                print("[VDRONE] FFmpeg pipe broken, restarting...")
-                ffmpeg_proc = start_ffmpeg(width, height, fps)
+                while not process_shutdown.is_set() and not stop_event.is_set():
+                    t_start = time.monotonic()
 
-            # ── Publish detections to NATS ───
-            now = time.monotonic()
-            if now - last_nats_publish >= PUBLISH_INTERVAL:
-                payload = results_to_payload(results, frame, frame_id, width, height)
-                payload["inference_ms"] = inference_ms
-                # Embed current telemetry so frontend gets it via /ws/vision
-                telem_snap = telemetry.tick(0)  # 0 dt = read-only snapshot
-                payload["telemetry"] = telem_snap
+                    # Read frame — on EOF, send final telemetry and return to IDLE
+                    ret, frame = cap.read()
+                    if not ret:
+                        print("[VDRONE] Video ended — broadcasting final landing telemetry...")
+                        final_telem = telemetry.tick(0, video_time=TelemetryState.VIDEO_DURATION)
+                        final_telem["alt"] = 0.0
+                        final_telem["spd"] = 0.0
+                        try:
+                            data = json.dumps(final_telem).encode()
+                            await js.publish("TELEMETRY.drone.live", data)
+                            print("[VDRONE] ✓ Final telemetry sent (alt=0.0, spd=0.0)")
+                        except Exception as e:
+                            print(f"[VDRONE] NATS final telemetry error: {e}")
+                        break  # → back to IDLE
 
-                # Enrich vessel detections with AIS data from Datalastic
-                if payload["detections"]:
-                    await enrich_detections_with_ais(
-                        payload["detections"], width, height,
-                        telem_snap["lat"], telem_snap["lon"], telem_snap["alt"],
-                        ais_service,
-                    )
+                    frame_id += 1
+                    video_time = frame_id / fps
 
-                det_count = len(payload["detections"])
-                total_detections += det_count
+                    # ── YOLOv8 Tracking (model.track with persistent IDs) ──
+                    t_inf = time.monotonic()
+                    results = model.track(frame, persist=True, conf=YOLO_CONF, verbose=False)
+                    inference_ms = round((time.monotonic() - t_inf) * 1000, 1)
 
+                    # ── Process tracked objects → ACTIVE_VISUALS_THIS_FRAME ──
+                    active_visuals: list[dict] = []
+                    processed_centers: list[tuple[float, float]] = []
+                    if results and len(results) > 0 and results[0].boxes is not None:
+                        boxes = results[0].boxes
+                        track_ids = boxes.id
+                        if track_ids is not None:
+                            for i in range(len(boxes)):
+                                x1, y1, x2, y2 = [int(v) for v in boxes.xyxy[i].tolist()]
+
+                                # Spatial dedup: skip if center is within 20px of an already-processed box
+                                cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                                is_dup = False
+                                for pc in processed_centers:
+                                    if abs(cx - pc[0]) < 20 and abs(cy - pc[1]) < 20:
+                                        is_dup = True
+                                        break
+                                if is_dup:
+                                    continue
+                                processed_centers.append((cx, cy))
+
+                                tid = int(track_ids[i].item())
+                                cls_id = int(boxes.cls[i].item())
+                                cls_name = results[0].names.get(cls_id, "unknown")
+                                conf = float(boxes.conf[i].item())
+                                maritime_cls = COCO_TO_MARITIME.get(cls_name, cls_name)
+
+                                if tid not in TRACKING_CACHE:
+                                    # New tracked object — crop for CLIP (not stored as snapshot)
+                                    crop_b64 = ""
+                                    try:
+                                        crop_img = frame[max(0, y1):y2, max(0, x1):x2]
+                                        ch, cw = crop_img.shape[:2]
+                                        if cw > 320:  # CLIP crop max (keep small for inference)
+                                            scale = 320 / cw
+                                            crop_img = cv2.resize(crop_img, (320, int(ch * scale)))
+                                        _, buf = cv2.imencode('.jpg', crop_img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                                        crop_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
+                                    except Exception:
+                                        pass
+
+                                    TRACKING_CACHE[tid] = {
+                                        "class_name": "Detecting...",
+                                        "maritime_cls": maritime_cls,
+                                        "confidence": round(conf, 4),
+                                        "bbox": [x1, y1, x2, y2],
+                                        "aisData": None,
+                                        "estimatedGps": None,
+                                        "status": "PENDING",
+                                        "last_seen_frame": frame_id,
+                                    }
+                                    mission_queue.put_nowait((tid, maritime_cls, crop_b64, width, height))
+                                    print(f"[TRACK] New object #{tid} ({maritime_cls}) — queued for CLIP")
+                                else:
+                                    # Known object — update bbox + confidence
+                                    TRACKING_CACHE[tid]["bbox"] = [x1, y1, x2, y2]
+                                    TRACKING_CACHE[tid]["confidence"] = round(conf, 4)
+                                    TRACKING_CACHE[tid]["last_seen_frame"] = frame_id
+
+                                # Build active visuals for THIS frame only
+                                active_visuals.append({
+                                    "id": tid,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "conf": conf,
+                                    "maritime_cls": maritime_cls,
+                                })
+
+                    # ── Garbage collect stale objects (not seen for 15+ frames) ──
+                    stale_ids = [tid for tid, entry in TRACKING_CACHE.items()
+                                 if frame_id - entry.get("last_seen_frame", frame_id) > 15]
+                    for tid in stale_ids:
+                        del TRACKING_CACHE[tid]
+                        VISUAL_HUD_CACHE.pop(tid, None)
+
+                    # ── Draw HUD strictly from active visuals (NO ghost boxes) ──
+                    annotated = draw_hud_from_cache(frame, active_visuals)
+
+                    # ── One-shot full-frame HD snapshot for NEW track IDs ──
+                    for vis in active_visuals:
+                        tid = vis["id"]
+                        if tid not in _snapshot_taken:
+                            try:
+                                h_frame, w_frame = annotated.shape[:2]
+                                scale = SNAPSHOT_MAX_WIDTH / w_frame
+                                resized = cv2.resize(annotated, (SNAPSHOT_MAX_WIDTH, int(h_frame * scale)))
+                                _, buf = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                                snap_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
+                                if tid in TRACKING_CACHE:
+                                    TRACKING_CACHE[tid]["snapshot_b64"] = snap_b64
+                                _snapshot_taken.add(tid)
+                                print(f"[SNAP] Full-frame HD snapshot taken for track #{tid}")
+                            except Exception:
+                                pass
+
+                    # ── Pipe to FFmpeg (RTSP) ──
+                    try:
+                        ffmpeg_proc.stdin.write(annotated.tobytes())
+                    except BrokenPipeError:
+                        print("[VDRONE] FFmpeg pipe broken, restarting...")
+                        ffmpeg_proc = start_ffmpeg(width, height, fps)
+
+                    # ── Publish detections to NATS (from TRACKING_CACHE) ──
+                    now = time.monotonic()
+                    if now - last_nats_publish >= PUBLISH_INTERVAL:
+                        payload = tracking_cache_to_payload(frame_id, width, height)
+                        payload["inference_ms"] = inference_ms
+                        telem_snap = telemetry.tick(0, video_time=video_time)
+                        payload["telemetry"] = telem_snap
+
+                        det_count = len(payload["detections"])
+                        total_detections += det_count
+
+                        try:
+                            data = json.dumps(payload).encode()
+                            await js.publish("VISION.ai.raw", data)
+                        except Exception as e:
+                            print(f"[VDRONE] NATS vision publish error: {e}")
+
+                        last_nats_publish = now
+
+                    # ── Publish telemetry ──
+                    if now - last_telemetry_publish >= 1.0:
+                        telem = telemetry.tick(1.0, video_time=video_time)
+                        try:
+                            data = json.dumps(telem).encode()
+                            await js.publish("TELEMETRY.drone.live", data)
+                        except Exception as e:
+                            print(f"[VDRONE] NATS telemetry publish error: {e}")
+                        last_telemetry_publish = now
+
+                    # ── Progress logging ──
+                    if frame_id % 100 == 0:
+                        tracked_count = len(TRACKING_CACHE)
+                        analyzed = sum(1 for e in TRACKING_CACHE.values() if e.get('status') == 'ANALYZED')
+                        print(
+                            f"[VDRONE] Frame #{frame_id} | "
+                            f"t={video_time:.1f}s | "
+                            f"Alt: {telemetry.alt:.1f}m | "
+                            f"Inference: {inference_ms}ms | "
+                            f"Tracked: {tracked_count} ({analyzed} analyzed)"
+                        )
+
+                    # ── Frame pacing ──
+                    elapsed = time.monotonic() - t_start
+                    sleep_time = max(0, frame_interval - elapsed)
+                    if sleep_time > 0:
+                        await asyncio.sleep(sleep_time)
+
+            finally:
+                # ── Cleanup ACTIVE resources (return to IDLE) ──
+                engine_active = False
+
+                # Cancel the background api_worker
+                worker_task.cancel()
                 try:
-                    data = json.dumps(payload).encode()
-                    await js.publish("VISION.ai.raw", data)
-                except Exception as e:
-                    print(f"[VDRONE] NATS vision publish error: {e}")
+                    await worker_task
+                except asyncio.CancelledError:
+                    pass
+                print(f"[VDRONE] Mission ended: {frame_id} frames, {len(TRACKING_CACHE)} tracked objects")
 
-                last_nats_publish = now
+                # If stopped via COMMAND.drone.stop, send final zero-altitude telemetry
+                if stop_event.is_set():
+                    final_telem = telemetry.tick(0, video_time=TelemetryState.VIDEO_DURATION)
+                    final_telem["alt"] = 0.0
+                    final_telem["spd"] = 0.0
+                    try:
+                        data = json.dumps(final_telem).encode()
+                        await js.publish("TELEMETRY.drone.live", data)
+                        print("[VDRONE] ✓ Final telemetry sent (alt=0.0, spd=0.0)")
+                    except Exception:
+                        pass
 
-            # ── Publish telemetry ────────────
-            if now - last_telemetry_publish >= 1.0:
-                telem = telemetry.tick(1.0)
+                # Release video and FFmpeg
+                cap.release()
+                if ffmpeg_proc.stdin:
+                    ffmpeg_proc.stdin.close()
                 try:
-                    data = json.dumps(telem).encode()
-                    await js.publish("TELEMETRY.drone.live", data)
-                except Exception as e:
-                    print(f"[VDRONE] NATS telemetry publish error: {e}")
+                    ffmpeg_proc.wait(timeout=5)
+                except Exception:
+                    ffmpeg_proc.kill()
 
-                last_telemetry_publish = now
-
-            # ── Progress logging ─────────────
-            if frame_id % 100 == 0:
-                print(
-                    f"[VDRONE] Frame #{frame_id} | "
-                    f"Inference: {inference_ms}ms | "
-                    f"Detections total: {total_detections} | "
-                    f"Battery: {telemetry.battery:.0f}%"
-                )
-
-            # ── Frame pacing ─────────────────
-            elapsed = time.monotonic() - t_start
-            sleep_time = max(0, frame_interval - elapsed)
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
+                print("[VDRONE] Resources released — returning to IDLE")
 
     finally:
-        print(f"\n[VDRONE] Summary: {frame_id} frames, {total_detections} detections")
-        if ffmpeg_proc.stdin:
-            ffmpeg_proc.stdin.close()
-        ffmpeg_proc.wait(timeout=5)
-        cap.release()
         await ais_service.close()
         await nc.drain()
         print("[VDRONE] Clean shutdown complete. Goodbye!")
@@ -680,3 +1103,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

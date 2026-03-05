@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import { useMutation, useQuery } from '@apollo/client';
 import { CREATE_MISSION, START_MISSION, DELETE_MISSION, GET_MISSIONS, GET_PILOTS, GET_ASSETS } from '../graphql/queries';
 import { Card } from './ui/card';
@@ -159,6 +160,12 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
   const useLivePilots = teamMembers.length > 0;
   const finalTeamMembers = useLivePilots ? teamMembers : mockTeamMembers;
 
+  // RBAC: current user context
+  const { user: currentUser } = useAuth();
+  const isPilotUser = currentUser?.roles?.some(r => r.toLowerCase() === 'pilot') ?? false;
+  const isCommanderOrAdmin = currentUser?.roles?.some(r => ['commander', 'admin'].includes(r.toLowerCase())) ?? false;
+  const canCreateMission = isCommanderOrAdmin || isPilotUser;
+
   const devices = (assetsData?.getAssets || []).map((a: any) => ({
     id: a.id,
     name: a.name,
@@ -185,6 +192,47 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
     { id: 4, name: 'Anomaly Scoring', status: 'pending' as 'pending' | 'processing' | 'completed' },
     { id: 5, name: 'Report Generation', status: 'pending' as 'pending' | 'processing' | 'completed' },
   ]);
+
+  // AI Vision Status (WebSocket from backend /ws/ai-status)
+  const [aiStatus, setAiStatus] = useState<string>('OFFLINE');
+  const [aiMessage, setAiMessage] = useState<string>('Connecting to AI system...');
+  const [aiProgress, setAiProgress] = useState<number>(0);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.hostname}:8080/ws/ai-status`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.status) setAiStatus(data.status);
+          if (data.message) setAiMessage(data.message);
+          if (data.progress !== undefined) setAiProgress(data.progress);
+        } catch { /* ignore parse errors */ }
+      };
+
+      ws.onclose = () => {
+        // Auto-reconnect after 3s
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        ws?.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, []);
 
   const handleStartAnalysis = () => {
     if (!selectedMission) return;
@@ -280,10 +328,13 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
   const [localMissions, setLocalMissions] = useState<Mission[]>([]);
 
   // Merge: live Postgres missions + any local-only missions not yet in Postgres
+  // Exclude completed missions — they belong in Mission History, not this active list
   const missions = useMemo(() => {
     const liveIds = new Set(liveMissions.map(m => m.id));
     const uniqueLocal = localMissions.filter(m => !liveIds.has(m.id));
-    return [...liveMissions, ...uniqueLocal];
+    return [...liveMissions, ...uniqueLocal].filter(
+      m => m.status !== 'completed'
+    );
   }, [liveMissions, localMissions]);
 
   const [editingMission, setEditingMission] = useState<Mission | null>(null);
@@ -645,17 +696,23 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
       {/* Mission Section Navigation */}
       {!['live-mission-detail', 'post-analysis'].includes(view) && (
         <div className="flex items-center gap-3 mb-6">
-          <Button
-            onClick={() => {
-              resetForm();
-              setEditingMission(null);
-              setView('create-mission');
-            }}
-            className="bg-[#21A68D] hover:bg-[#1a8a72] text-white"
-          >
-            <Plus className="w-4 h-4 mr-2" />
-            Create Mission
-          </Button>
+          {canCreateMission && (
+            <Button
+              onClick={() => {
+                resetForm();
+                setEditingMission(null);
+                setView('create-mission');
+                // Auto-fill pilot user as Lead Pilot (first team member)
+                if (isPilotUser && currentUser?.id) {
+                  setAssignedTeam([currentUser.id]);
+                }
+              }}
+              className="bg-[#21A68D] hover:bg-[#1a8a72] text-white"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Create Mission
+            </Button>
+          )}
           <Button
             variant={view === 'mission-list' ? 'default' : 'outline'}
             className={`transition-all duration-300 hover:scale-105 active:scale-95 shadow-sm hover:shadow-md ${view === 'mission-list'
@@ -776,7 +833,7 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                 </div>
 
                 <div className="flex gap-2">
-                  {mission.status !== 'live' && (
+                  {mission.status === 'pending' && (
                     <Button
                       size="sm"
                       onClick={() => handleAcceptMission(mission)}
@@ -785,7 +842,7 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                       Accept Mission
                     </Button>
                   )}
-                  {mission.status === 'live' && (
+                  {(mission.status === 'live' || mission.status === 'accepted') && (
                     <Button
                       size="sm"
                       onClick={() => handleViewLiveMission(mission)}
@@ -1761,10 +1818,10 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                   <div className="p-3 rounded-lg bg-muted/30">
                     <p className="text-xs text-muted-foreground mb-1">Drone</p>
                     <p className="font-medium">
-                      {mockDevices.find(d => d.id === selectedMission.assignedDevice)?.name}
+                      {finalDevices.find((d: any) => d.id === selectedMission.assignedDevice)?.name || selectedMission.assignedDevice || 'Unknown Asset'}
                     </p>
                     <Badge variant="outline" className="mt-1" style={{ borderColor: '#21A68D', color: '#21A68D' }}>
-                      {mockDevices.find(d => d.id === selectedMission.assignedDevice)?.type}
+                      {finalDevices.find((d: any) => d.id === selectedMission.assignedDevice)?.type || 'UAV'}
                     </Badge>
                   </div>
                   <div className="p-3 rounded-lg bg-muted/30">
@@ -1840,16 +1897,61 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
               </Card>
             )}
 
-            {/* Launch Confirmation */}
-            <Card className="p-6 bg-card border-border">
-              <div className="flex items-start gap-3 mb-4">
-                <AlertCircle className="w-5 h-5 text-[#D4E268] mt-0.5" />
-                <div>
-                  <h3 className="font-medium mb-1">Ready for Launch</h3>
-                  <p className="text-sm text-muted-foreground">
-                    All pre-flight checks have been completed successfully. The drone is ready for mission deployment.
-                    Click "Launch Mission" to begin operations.
-                  </p>
+            {/* Launch Confirmation — Dynamic AI Status Banner */}
+            <Card className={`p-6 border ${aiStatus === 'IDLE'
+              ? 'bg-emerald-500/5 border-emerald-500/30'
+              : aiStatus === 'BOOTING'
+                ? 'bg-amber-500/5 border-amber-500/30'
+                : 'bg-red-500/5 border-red-500/30'
+              }`}>
+              <div className="flex items-start gap-3">
+                {aiStatus === 'IDLE' ? (
+                  <CheckCircle className="w-6 h-6 text-emerald-400 mt-0.5 flex-shrink-0" />
+                ) : aiStatus === 'BOOTING' ? (
+                  <div className="w-6 h-6 mt-0.5 flex-shrink-0 border-2 border-amber-400/30 border-t-amber-400 rounded-full animate-spin" />
+                ) : (
+                  <AlertCircle className="w-6 h-6 text-red-400 mt-0.5 flex-shrink-0" />
+                )}
+                <div className="flex-1">
+                  {aiStatus === 'IDLE' ? (
+                    <>
+                      <h3 className="font-semibold text-emerald-400 mb-1">Ready for Launch</h3>
+                      <p className="text-sm text-emerald-300/80">
+                        All systems operational. AI models loaded successfully. Click "Launch Mission" to begin operations.
+                      </p>
+                    </>
+                  ) : aiStatus === 'BOOTING' ? (
+                    <>
+                      <h3 className="font-semibold text-amber-400 mb-1">System Calibrating</h3>
+                      <p className="text-sm text-amber-300/80 mb-3">
+                        [SYSTEM BOOTING]: {aiMessage} ({aiProgress}%)
+                      </p>
+                      {/* Progress Bar */}
+                      <div className="w-full h-2.5 bg-gray-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-amber-500 to-amber-400 rounded-full transition-all duration-700 ease-out"
+                          style={{ width: `${aiProgress}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-2">
+                        Please wait for all AI models to finish loading before launching.
+                      </p>
+                    </>
+                  ) : aiStatus === 'ACTIVE' ? (
+                    <>
+                      <h3 className="font-semibold text-blue-400 mb-1">Mission Already Active</h3>
+                      <p className="text-sm text-blue-300/80">
+                        {aiMessage}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <h3 className="font-semibold text-red-400 mb-1">AI Offline</h3>
+                      <p className="text-sm text-red-300/80">
+                        Connection lost or AI system not started. Check the backend logs.
+                      </p>
+                    </>
+                  )}
                 </div>
               </div>
             </Card>
@@ -1865,8 +1967,8 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
               </Button>
               <Button
                 onClick={handleLaunchMission}
-                disabled={isLaunching}
-                className="bg-[#22c55e] hover:bg-[#22c55e]/90 text-white"
+                disabled={isLaunching || aiStatus !== 'IDLE'}
+                className="bg-[#22c55e] hover:bg-[#22c55e]/90 text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isLaunching ? (
                   <>

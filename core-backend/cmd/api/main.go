@@ -14,6 +14,8 @@ import (
 	"locallitix-core/pkg/natsjs"
 	"locallitix-core/workers/ingestor"
 	"locallitix-core/workers/simulator"
+
+	"github.com/nats-io/nats.go"
 )
 
 func main() {
@@ -64,6 +66,22 @@ func main() {
 
 	if err := adapter.ListenForVision(); err != nil {
 		log.Fatalf("%v", err)
+	}
+
+	// ============================================
+	// AI STATUS MANAGER (Gatekeeper)
+	// ============================================
+
+	aiStatus := api.NewAIStatusManager()
+
+	// Subscribe to AI lifecycle broadcasts from virtual_drone.py
+	_, err = natsClient.Conn.Subscribe("SYSTEM.ai.status", func(msg *nats.Msg) {
+		aiStatus.HandleNATSMessage(msg.Data)
+	})
+	if err != nil {
+		log.Printf("[CORE] WARNING: Failed to subscribe to SYSTEM.ai.status: %v", err)
+	} else {
+		log.Println("[CORE] ✓ Subscribed to SYSTEM.ai.status (AI Gatekeeper active)")
 	}
 
 	// ============================================
@@ -128,6 +146,44 @@ func main() {
 	// --- WebSocket (no cookie middleware — WS uses its own auth) ---
 	visionHub := api.NewVisionHub(visionChannel)
 	mux.HandleFunc("/ws/vision", api.WsVisionHandler(visionHub))
+	mux.HandleFunc("/ws/ai-status", api.WsAIStatusHandler(aiStatus))
+	// --- Drone Command Endpoints (publish to NATS) ---
+	mux.Handle("/api/drone/start", cookieMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// GATEKEEPER: Reject if AI is not ready
+		if aiStatus.GetStatus() != "IDLE" {
+			log.Printf("[CORE] ⚠️ Drone start REJECTED — AI status: %s", aiStatus.GetStatus())
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"AI System is not ready","aiStatus":"` + aiStatus.GetStatus() + `"}`))
+			return
+		}
+		if err := natsClient.Conn.Publish("COMMAND.drone.start", []byte(`{"action":"start"}`)); err != nil {
+			log.Printf("[CORE] Failed to publish drone start: %v", err)
+			http.Error(w, "failed to publish start command", http.StatusInternalServerError)
+			return
+		}
+		log.Println("[CORE] 🟢 COMMAND.drone.start published — drone will begin mission")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})))
+	mux.Handle("/api/drone/stop", cookieMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := natsClient.Conn.Publish("COMMAND.drone.stop", []byte(`{"action":"stop"}`)); err != nil {
+			log.Printf("[CORE] Failed to publish drone stop: %v", err)
+			http.Error(w, "failed to publish stop command", http.StatusInternalServerError)
+			return
+		}
+		log.Println("[CORE] ⛔ COMMAND.drone.stop published — drone will shut down")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})))
 
 	// --- Legacy secure test ---
 	bearerMiddleware := auth.KeycloakMiddleware(keycloakURL)
@@ -146,6 +202,7 @@ func main() {
 	log.Println("[CORE]  GraphQL:  /api/graphql")
 	log.Println("[CORE]  Users:    /api/admin/users")
 	log.Println("[CORE]  Vision:   /ws/vision")
+	log.Println("[CORE]  AI Status:/ws/ai-status")
 	log.Println("[CORE]  Pipeline: MARITIME.ais.live → InfluxDB")
 	log.Println("[CORE]  Sim:      AIS Simulator (16 vessels)")
 	log.Println("[CORE] ======================================")

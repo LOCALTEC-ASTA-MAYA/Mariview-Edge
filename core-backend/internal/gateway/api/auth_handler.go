@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"locallitix-core/internal/domain"
+	"locallitix-core/internal/infrastructure/database"
+
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -19,6 +22,7 @@ type LoginRequest struct {
 }
 
 type LoginResponse struct {
+	ID       string   `json:"id"`
 	Username string   `json:"username"`
 	Email    string   `json:"email"`
 	Name     string   `json:"name"`
@@ -183,6 +187,14 @@ func MeHandler(jwksURL string) http.HandlerFunc {
 		}
 
 		userResp := buildUserResponse(claims)
+
+		// Populate DB user ID from Keycloak sub
+		if sub, ok := claims["sub"].(string); ok && sub != "" {
+			var dbUser domain.User
+			if err := database.DB.Where("keycloak_id = ?", sub).First(&dbUser).Error; err == nil {
+				userResp.ID = dbUser.ID.String()
+			}
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(userResp)

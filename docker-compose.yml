@@ -148,12 +148,14 @@ services:
     depends_on:
       - locallitix-backbone
       - locallitix-video
+    env_file:
+      - .env
     volumes:
-      - ./mariview-frontend/public/assets/raw_drone.mp4:/app/videos/raw_drone.mp4:ro
+      - ./mariview-frontend/public/assets/drone.mp4:/app/videos/drone.mp4:ro
     environment:
       - NATS_URL=nats://locallitix-backbone:4222
       - MEDIAMTX_RTSP_URL=rtsp://locallitix-video:8554/drone-cam
-      - VIDEO_PATH=/app/videos/raw_drone.mp4
+      - VIDEO_PATH=/app/videos/drone.mp4
       - YOLO_MODEL=yolov8n.pt
       - YOLO_CONF=0.35
     restart: unless-stopped
