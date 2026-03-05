@@ -45,7 +45,7 @@ except ImportError:
     print("[VDRONE] WARNING: aiohttp not installed — Datalastic AIS enrichment disabled")
 
 # CLIP candidate classes for zero-shot maritime classification
-CLIP_CANDIDATES = ["Yacht", "Sailboat", "Cargo Vessel", "Patrol Boat", "Speedboat", "Warship", "Floating Debris"]
+CLIP_CANDIDATES = ["Yacht", "Sailboat", "Cargo Vessel", "Patrol Boat", "Speedboat", "Warship", "Floating Debris", "Pier or Dock", "Ocean Wave"]
 
 # ─────────────────────────────────────────────
 # Datalastic AIS Service
@@ -56,11 +56,7 @@ DATALASTIC_BASE_URL = "https://api.datalastic.com/api/v0"
 AIS_SEARCH_RADIUS_KM = 5  # search for vessels within 5km of estimated GPS
 AIS_CACHE_TTL = 60  # cache AIS results for 60 seconds
 AIS_RATE_LIMIT_SECS = 30  # max 1 API call per 30 seconds
-
-# ── Circuit Breaker / Demo Flag ──
-SIMULATE_API_DOWN = os.getenv("SIMULATE_API_DOWN", "false").lower() == "true"
-
-# KKP Demo fallback AIS payload (used when API is down or SIMULATE_API_DOWN=True)
+# KKP Demo fallback AIS payload (used when Datalastic API key is missing or aiohttp unavailable)
 KKP_FALLBACK_AIS = {
     "mmsi": "525000301",
     "vesselName": "KN TANJUNG DATU 301",
@@ -105,7 +101,7 @@ class DatalasticService:
     async def fetch_nearby_vessels(self, lat: float, lon: float) -> list[dict]:
         """Fetch AIS vessels near (lat, lon) from Datalastic API.
         Returns cached results if available and fresh."""
-        if not DATALASTIC_API_KEY or aiohttp is None or SIMULATE_API_DOWN:
+        if not DATALASTIC_API_KEY or aiohttp is None:
             return []
 
         # Cache key: rounded to 3 decimal places (~111m precision)
@@ -273,7 +269,7 @@ NATS_URL = os.getenv("NATS_URL", "nats://locallitix-backbone:4222")
 MEDIAMTX_RTSP_URL = os.getenv("MEDIAMTX_RTSP_URL", "rtsp://locallitix-video:8554/drone-cam")
 VIDEO_PATH = os.getenv("VIDEO_PATH", "/app/videos/raw_drone.mp4")
 YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
-YOLO_CONF = float(os.getenv("YOLO_CONF", "0.35"))
+YOLO_CONF = 0.25  # Low threshold to catch gray warships
 PUBLISH_INTERVAL = float(os.getenv("PUBLISH_INTERVAL", "0.5"))
 
 # Drone identity
@@ -658,7 +654,7 @@ def tracking_cache_to_payload(frame_id: int, frame_w: int, frame_h: int) -> dict
 
         det: dict = {
             "track_id": track_id,
-            "class": entry.get("maritime_cls", "unknown"),
+            "class": entry.get("class_name", entry.get("maritime_cls", "unknown")),
             "confidence": entry.get("confidence", 0.0),
             "bbox": bbox,
             "status": entry.get("status", "PENDING"),
@@ -671,7 +667,7 @@ def tracking_cache_to_payload(frame_id: int, frame_w: int, frame_h: int) -> dict
             det["estimatedGps"] = entry["estimatedGps"]
 
         # Full-frame HUD snapshot (stored in cache at capture time)
-        # Send exactly ONCE to NATS, then purge from cache to prevent spam
+        # Sent continuously — React frontend deduplicates by track_id
         if entry.get("snapshot_b64"):
             det["snapshot_b64"] = entry["snapshot_b64"]
             entry["snapshot_b64"] = None
@@ -749,7 +745,7 @@ async def main():
     import torch
     from ultralytics import YOLO
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"[VDRONE] Device: {device.upper()} ({'GPU accelerated' if device == 'cuda' else 'CPU mode'})")
+    print(f"[VDRONE] HARDWARE DETECTED: {device.upper()} ({'GPU accelerated' if device == 'cuda' else 'CPU mode'})")
     await broadcast_status(nc, "BOOTING", "Loading YOLOv8 Vision...", 40)
     print(f"[VDRONE] Loading YOLOv8 model: {YOLO_MODEL} ...")
     model = YOLO(YOLO_MODEL).to(device)
@@ -785,12 +781,10 @@ async def main():
     frame_interval = 1.0 / fps
     ais_service = DatalasticService()
 
-    if DATALASTIC_API_KEY and not SIMULATE_API_DOWN:
+    if DATALASTIC_API_KEY and aiohttp is not None:
         print(f"[VDRONE] Datalastic AIS enrichment ENABLED (key={DATALASTIC_API_KEY[:8]}...)")
-    elif SIMULATE_API_DOWN:
-        print("[VDRONE] Datalastic AIS: SIMULATE_API_DOWN=True → using KKP fallback")
     else:
-        print("[VDRONE] Datalastic AIS enrichment DISABLED (no DATALASTIC_API_KEY)")
+        print("[VDRONE] Datalastic AIS enrichment DISABLED → using KKP fallback data")
 
     # ── Process-level shutdown (SIGINT / SIGTERM exits entire process) ──
     process_shutdown = asyncio.Event()
@@ -920,9 +914,18 @@ async def main():
                         track_ids = boxes.id
                         if track_ids is not None:
                             for i in range(len(boxes)):
+                                # URUTAN 1: BONGKAR KOORDINATNYA DULU!
                                 x1, y1, x2, y2 = [int(v) for v in boxes.xyxy[i].tolist()]
 
-                                # Spatial dedup: skip if center is within 20px of an already-processed box
+                                # URUTAN 2: BARU HITUNG UKURANNYA DAN FILTER (TACTICAL FILTER)
+                                # TACTICAL FILTER
+                                box_w, box_h = x2 - x1, y2 - y1
+                                if box_w < 50 or box_h < 50:
+                                    continue # Abaikan noise ombak kecil
+                                if box_w > width * 0.95 or box_h > height * 0.95:
+                                    continue # Kapal besar (Gambar 6) akan lolos sekarang!
+
+                                # URUTAN 3: LANJUTKAN KE DEDUP SPASIAL
                                 cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
                                 is_dup = False
                                 for pc in processed_centers:
@@ -989,22 +992,35 @@ async def main():
                     # ── Draw HUD strictly from active visuals (NO ghost boxes) ──
                     annotated = draw_hud_from_cache(frame, active_visuals)
 
-                    # ── One-shot full-frame HD snapshot for NEW track IDs ──
+                    # ── One-shot full-frame HD snapshot for ANALYZED objects (SINGLE BOX ONLY) ──
+                    SNAPSHOT_SKIP_CLASSES = {"Pier or Dock", "Ocean Wave", "Floating Debris"}
+                    # ── SMART SNAPSHOT (ANTI-SAMPAT & TEPAT WAKTU) ──
                     for vis in active_visuals:
                         tid = vis["id"]
-                        if tid not in _snapshot_taken:
-                            try:
-                                h_frame, w_frame = annotated.shape[:2]
-                                scale = SNAPSHOT_MAX_WIDTH / w_frame
-                                resized = cv2.resize(annotated, (SNAPSHOT_MAX_WIDTH, int(h_frame * scale)))
-                                _, buf = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                                snap_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
-                                if tid in TRACKING_CACHE:
-                                    TRACKING_CACHE[tid]["snapshot_b64"] = snap_b64
-                                _snapshot_taken.add(tid)
-                                print(f"[SNAP] Full-frame HD snapshot taken for track #{tid}")
-                            except Exception:
-                                pass
+                        cache_entry = TRACKING_CACHE.get(tid)
+                        
+                        if cache_entry and tid not in _snapshot_taken:
+                            status = cache_entry.get("status")
+                            cls_name = cache_entry.get("class_name", "")
+                            ignore_classes = ["Pier or Dock", "Ocean Wave", "Floating Debris"]
+                            
+                            # KUNCI: Harus nunggu ANALYZED dulu!
+                            if status == "ANALYZED":
+                                if cls_name not in ignore_classes:
+                                    # JIKA KAPAL BENERAN: Ambil fotonya!
+                                    try:
+                                        single_obj_frame = draw_hud_from_cache(frame, [vis])
+                                        h_frame, w_frame = single_obj_frame.shape[:2]
+                                        scale = SNAPSHOT_MAX_WIDTH / w_frame
+                                        resized = cv2.resize(single_obj_frame, (SNAPSHOT_MAX_WIDTH, int(h_frame * scale)))
+                                        _, buf = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                                        TRACKING_CACHE[tid]["snapshot_b64"] = base64.b64encode(buf.tobytes()).decode('ascii')
+                                        _snapshot_taken.add(tid)
+                                    except Exception:
+                                        pass
+                                else:
+                                    # JIKA DERMAGA/OMBAK: Blacklist ID-nya agar selamanya tidak difoto!
+                                    _snapshot_taken.add(tid)
 
                     # ── Pipe to FFmpeg (RTSP) ──
                     try:

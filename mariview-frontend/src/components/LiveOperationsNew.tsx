@@ -464,14 +464,15 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                       </button>
                     )}
                     {/* Only render bboxes when video is actually playing (not buffering) */}
-                    {isVideoReady && (
+                    {/* {isVideoReady && (
                       <BoundingBoxOverlay
                         detections={liveDetections}
                         videoRef={sidebarVideoRef}
                         sourceResolution={lastFrame?.resolution || [1920, 1080]}
                         className="scale-105"
                       />
-                    )}
+                    )} 
+                    */}
 
                   </div>
                 </div>
@@ -484,11 +485,11 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                         <Activity className="w-3.5 h-3.5 text-sky-400" />
                         <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-sky-400">AI Detection Engine</h3>
                       </div>
-                      {lastFrame && (
+                      {/* {lastFrame && (
                         <span className="text-[8px] font-mono text-white/40">
                           {lastFrame.model} • {lastFrame.inference_ms}ms • F#{frameCount}
                         </span>
-                      )}
+                      )} */}
                     </div>
                   </div>
                   <div className="flex-1 overflow-y-auto px-3 pb-3">
@@ -500,7 +501,7 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                           <span className="text-[9px] font-black uppercase tracking-[0.15em] text-emerald-400">AI Detections</span>
                           <span className="text-[9px] font-mono text-white/30 ml-auto">{detectionHistory.length} events</span>
                         </div>
-                        {detectionHistory.map((det, idx) => (
+                        {detectionHistory.filter(det => det.snapshot_b64).map((det, idx) => (
                           <motion.div
                             key={`det-${idx}-${(det as any)._ts || ''}`}
                             initial={{ opacity: 0, y: 20 }}
@@ -514,9 +515,7 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                                   <div className="flex items-center gap-1.5">
                                     <Ship className="w-3.5 h-3.5" style={{ color: '#21A68D' }} />
                                     <span className="text-[10px] font-semibold text-white">
-                                      {det.aisData?.vesselName
-                                        ? 'Vessel Detection & Recognition'
-                                        : det.class.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                      {det.class.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
                                     </span>
                                   </div>
                                   <Badge

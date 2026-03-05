@@ -28,6 +28,7 @@ export interface VisionDetection {
     snapshot_b64?: string; // base64 JPEG crop of the detected object
     aisData?: AISData | null; // AIS correlation data (null = pending, undefined = not a vessel)
     estimatedGps?: { lat: number; lon: number }; // estimated GPS from bbox projection
+    _ts?: number;
 }
 
 export interface VisionFrame {
@@ -140,41 +141,43 @@ export function useVisionWebSocket(staleTimeoutMs = 3000, enabled = true): UseVi
                 setLastFrame(frame);
                 setDetections(frame.detections || []);
                 setFrameCount(c => c + 1);
+
                 // Update live telemetry if present
                 if (frame.telemetry) {
                     setTelemetry(frame.telemetry);
                 }
-                // Upsert detectionHistory by track_id (deduplicate cards)
+
                 const incoming = frame.detections || [];
                 if (incoming.length > 0) {
                     setDetectionHistory(prev => {
-                        const map = new Map<number, VisionDetection>();
-                        // Index existing entries by track_id
-                        for (const d of prev) {
-                            if (d.track_id != null) map.set(d.track_id, d);
-                        }
-                        // Upsert incoming detections
-                        for (const d of incoming) {
-                            if (d.track_id == null) continue;
-                            const existing = map.get(d.track_id);
-                            if (existing) {
-                                // Update fields but PRESERVE snapshot if incoming is empty
-                                map.set(d.track_id, {
-                                    ...existing,
-                                    class: d.class,
-                                    confidence: d.confidence,
-                                    bbox: d.bbox,
-                                    status: d.status,
-                                    aisData: d.aisData ?? existing.aisData,
-                                    estimatedGps: d.estimatedGps ?? existing.estimatedGps,
-                                    snapshot_b64: d.snapshot_b64 || existing.snapshot_b64,
-                                });
+                        let updated = [...prev];
+                        const now = Date.now(); // Ambil waktu sekarang untuk _ts
+
+                        incoming.forEach(newDet => {
+                            if (newDet.track_id == null) return;
+
+                            // Cari apakah kapal sudah ada di array
+                            const existingIndex = updated.findIndex(d => d.track_id === newDet.track_id);
+
+                            if (existingIndex > -1) {
+                                // 🟢 KAPAL SUDAH ADA: Update data, PERTAHANKAN POSISI & FOTO
+                                const existingDet = updated[existingIndex];
+                                updated[existingIndex] = {
+                                    ...existingDet,
+                                    ...newDet,
+                                    // Jaga foto lama agar tidak berkedip kosong
+                                    snapshot_b64: newDet.snapshot_b64 || existingDet.snapshot_b64,
+                                    _ts: now
+                                };
+                                // HAPUS LOGIKA SPLICE & UNSHIFT DI SINI AGAR KARTU TIDAK LONCAT-LONCAT!
                             } else {
-                                // New track_id
-                                map.set(d.track_id, { ...d });
+                                // 🔵 KAPAL BARU: Taruh di paling atas
+                                updated.unshift({ ...newDet, _ts: now });
                             }
-                        }
-                        return Array.from(map.values()).slice(0, 50);
+                        });
+
+                        // Batasi 20 kartu saja agar memori aman dan tidak ngelag
+                        return updated.slice(0, 20);
                     });
                 }
                 resetStaleTimer();
