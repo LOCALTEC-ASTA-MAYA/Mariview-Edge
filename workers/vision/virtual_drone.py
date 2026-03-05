@@ -269,7 +269,7 @@ NATS_URL = os.getenv("NATS_URL", "nats://locallitix-backbone:4222")
 MEDIAMTX_RTSP_URL = os.getenv("MEDIAMTX_RTSP_URL", "rtsp://locallitix-video:8554/drone-cam")
 VIDEO_PATH = os.getenv("VIDEO_PATH", "/app/videos/raw_drone.mp4")
 YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
-YOLO_CONF = 0.25  # Low threshold to catch gray warships
+YOLO_CONF = 0.38  # Low threshold to catch gray warships
 PUBLISH_INTERVAL = float(os.getenv("PUBLISH_INTERVAL", "0.5"))
 
 # Drone identity
@@ -920,7 +920,7 @@ async def main():
                                 # URUTAN 2: BARU HITUNG UKURANNYA DAN FILTER (TACTICAL FILTER)
                                 # TACTICAL FILTER
                                 box_w, box_h = x2 - x1, y2 - y1
-                                if box_w < 50 or box_h < 50:
+                                if box_w < 80 or box_h < 80:
                                     continue # Abaikan noise ombak kecil
                                 if box_w > width * 0.95 or box_h > height * 0.95:
                                     continue # Kapal besar (Gambar 6) akan lolos sekarang!
