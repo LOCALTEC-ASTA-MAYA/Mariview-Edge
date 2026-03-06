@@ -232,7 +232,7 @@ func hasRole(userRole string, roles ...string) bool {
 
 func queryMissions(db *gorm.DB, variables map[string]interface{}, currentUser *domain.User) ([]domain.Mission, error) {
 	var missions []domain.Mission
-	q := db.Preload("Asset").Preload("Pilot").Order("created_at DESC")
+	q := db.Preload("Asset").Preload("Pilot").Preload("Snapshots").Order("created_at DESC")
 
 	if status, ok := variables["status"].(string); ok && status != "" {
 		q = q.Where("status = ?", status)
@@ -267,7 +267,7 @@ func queryMissionByID(db *gorm.DB, variables map[string]interface{}) (*domain.Mi
 	}
 
 	var mission domain.Mission
-	if err := db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", id).Error; err != nil {
+	if err := db.Preload("Asset").Preload("Pilot").Preload("Snapshots").First(&mission, "id = ?", id).Error; err != nil {
 		return nil, fmt.Errorf("mission not found")
 	}
 	return &mission, nil
@@ -372,6 +372,14 @@ func resolveMutations(ctx context.Context, query string, variables map[string]in
 		result["submitPreFlightCheck"] = check
 	}
 
+	if containsField(query, "deleteAllMissions") {
+		ok, err := mutateDeleteAllMissions(db)
+		if err != nil {
+			return nil, err
+		}
+		result["deleteAllMissions"] = ok
+	}
+
 	return result, nil
 }
 
@@ -401,8 +409,15 @@ func mutateCreateMission(db *gorm.DB, variables map[string]interface{}) (*domain
 		teamMemberIDs = t
 	}
 
+	// ALWAYS auto-generate missionCode: MSN-YYYY-NNNNN (sequential per year)
+	year := time.Now().Year()
+	var count int64
+	db.Model(&domain.Mission{}).Where("EXTRACT(YEAR FROM created_at) = ?", year).Count(&count)
+	missionCode := fmt.Sprintf("MSN-%d-%05d", year, count+1)
+	log.Printf("[GQL] Generated missionCode: %s (year=%d, existing=%d)", missionCode, year, count)
+
 	mission := domain.Mission{
-		MissionCode:   fmt.Sprintf("%v", input["missionCode"]),
+		MissionCode:   missionCode,
 		Name:          fmt.Sprintf("%v", input["name"]),
 		Category:      fmt.Sprintf("%v", input["category"]),
 		AreaPolygon:   fmt.Sprintf("%v", input["areaPolygon"]),
@@ -439,8 +454,30 @@ func mutateUpdateMissionStatus(db *gorm.DB, variables map[string]interface{}) (*
 	}
 
 	mission.Status = status
+
+	// On COMPLETED: calculate duration + total detections
+	if strings.ToUpper(status) == "COMPLETED" {
+		now := time.Now()
+		mission.EndedAt = &now
+
+		// Calculate real duration from StartedAt
+		if mission.StartedAt != nil {
+			mission.Duration = int(now.Sub(*mission.StartedAt).Minutes())
+			if mission.Duration < 1 {
+				mission.Duration = 1 // minimum 1 minute
+			}
+			log.Printf("[GQL] Mission %s completed — duration: %d min", mission.MissionCode, mission.Duration)
+		}
+
+		// Count snapshots for this mission
+		var snapCount int64
+		db.Model(&domain.Snapshot{}).Where("mission_id = ?", mission.ID).Count(&snapCount)
+		mission.TotalDetections = int(snapCount)
+		log.Printf("[GQL] Mission %s — total detections: %d", mission.MissionCode, mission.TotalDetections)
+	}
+
 	db.Save(&mission)
-	db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", mission.ID)
+	db.Preload("Asset").Preload("Pilot").Preload("Snapshots").First(&mission, "id = ?", mission.ID)
 	return &mission, nil
 }
 
@@ -459,7 +496,7 @@ func mutateStartMission(db *gorm.DB, variables map[string]interface{}) (*domain.
 	mission.Status = "LIVE"
 	mission.StartedAt = &now
 	db.Save(&mission)
-	db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", mission.ID)
+	db.Preload("Asset").Preload("Pilot").Preload("Snapshots").First(&mission, "id = ?", mission.ID)
 	return &mission, nil
 }
 
@@ -478,7 +515,7 @@ func mutateAbortMission(db *gorm.DB, variables map[string]interface{}) (*domain.
 	mission.Status = "ABORTED"
 	mission.EndedAt = &now
 	db.Save(&mission)
-	db.Preload("Asset").Preload("Pilot").First(&mission, "id = ?", mission.ID)
+	db.Preload("Asset").Preload("Pilot").Preload("Snapshots").First(&mission, "id = ?", mission.ID)
 	return &mission, nil
 }
 
@@ -539,6 +576,23 @@ func mutateDeleteMission(db *gorm.DB, variables map[string]interface{}) (bool, e
 	if err := db.Delete(&mission).Error; err != nil {
 		return false, fmt.Errorf("failed to delete mission: %v", err)
 	}
+	return true, nil
+}
+
+func mutateDeleteAllMissions(db *gorm.DB) (bool, error) {
+	// Delete all snapshots first (safety net even with CASCADE)
+	if err := db.Exec("DELETE FROM snapshots").Error; err != nil {
+		log.Printf("[GQL] Failed to delete snapshots: %v", err)
+	}
+	// Hard-delete all missions (bypass soft-delete)
+	if err := db.Exec("DELETE FROM missions").Error; err != nil {
+		log.Printf("[GQL] Failed to delete all missions: %v", err)
+		return false, fmt.Errorf("failed to delete all missions")
+	}
+	// Also clear pre-flight checks and archives
+	db.Exec("DELETE FROM pre_flight_checks")
+	db.Exec("DELETE FROM mission_archives")
+	log.Println("[GQL] ✅ All missions, snapshots, pre-flight checks, and archives wiped")
 	return true, nil
 }
 

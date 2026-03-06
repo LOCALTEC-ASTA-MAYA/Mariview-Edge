@@ -35,6 +35,7 @@ func InitPostgres(dsn string) *gorm.DB {
 		&domain.User{},
 		&domain.Asset{},
 		&domain.Mission{},
+		&domain.Snapshot{},
 		&domain.PreFlightCheck{},
 		&domain.MissionArchive{},
 	)

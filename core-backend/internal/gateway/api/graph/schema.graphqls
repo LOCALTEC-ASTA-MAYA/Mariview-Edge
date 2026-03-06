@@ -42,13 +42,31 @@ type Mission {
     status: String!
     areaPolygon: String!
     duration: Int!
+    coverageArea: Float!
+    totalDetections: Int!
     asset: Asset!
     pilot: User!
+    snapshots: [Snapshot!]!
     teamMemberIds: String
+    videoPath: String
     preFlight: PreFlightCheck
     startedAt: Time
     endedAt: Time
     createdAt: Time!
+}
+
+type Snapshot {
+    id: ID!
+    missionId: ID!
+    trackId: Int!
+    classification: String!
+    confidence: Float!
+    snapshotUrl: String
+    bboxX1: Float!
+    bboxY1: Float!
+    bboxX2: Float!
+    bboxY2: Float!
+    detectedAt: Time!
 }
 
 type TelemetryPoint {
@@ -160,6 +178,7 @@ type Mutation {
     createMission(input: CreateMissionInput!): Mission!
     updateMissionStatus(id: ID!, status: String!): Mission!
     deleteMission(id: ID!): Boolean!
+    deleteAllMissions: Boolean!
     
     submitPreFlightCheck(input: UpdatePreFlightInput!): PreFlightCheck!
     

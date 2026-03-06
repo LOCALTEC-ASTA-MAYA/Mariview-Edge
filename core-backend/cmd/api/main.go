@@ -59,7 +59,7 @@ func main() {
 
 	visionChannel := make(chan []byte, 1000)
 
-	adapter, err := ai_adapter.NewAIAdapter(natsURL, visionChannel, legacyInflux)
+	adapter, err := ai_adapter.NewAIAdapter(natsURL, visionChannel, legacyInflux, database.DB)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}

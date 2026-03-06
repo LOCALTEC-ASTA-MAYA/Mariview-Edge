@@ -522,7 +522,7 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
     const pilotMember = mockTeamMembers.find(t => t.id === assignedTeam[0]);
     const device = mockDevices.find(d => d.id === assignedDevice);
 
-    const missionCode = `MSN-${Date.now()}`;
+    const missionCode = 'AUTO';
 
     try {
       // Call GraphQL mutation → Postgres

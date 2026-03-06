@@ -96,6 +96,10 @@ export function useVisionWebSocket(staleTimeoutMs = 3000, enabled = true): UseVi
     const enabledRef = useRef(enabled);
     enabledRef.current = enabled;
 
+    // Tab visibility: skip state updates when tab is hidden to prevent flicker
+    const tabVisibleRef = useRef(true);
+    const pendingFrameRef = useRef<VisionFrame | null>(null);
+
     const clearStaleTimer = useCallback(() => {
         if (staleTimerRef.current) {
             clearTimeout(staleTimerRef.current);
@@ -136,6 +140,12 @@ export function useVisionWebSocket(staleTimeoutMs = 3000, enabled = true): UseVi
             if (!mountedRef.current) return;
             // Drop data when not enabled (video not yet playing)
             if (!enabledRef.current) return;
+
+            // When tab is hidden, stash the latest frame but skip React state updates
+            if (!tabVisibleRef.current) {
+                try { pendingFrameRef.current = JSON.parse(event.data); } catch { /* ignore */ }
+                return;
+            }
             try {
                 const frame: VisionFrame = JSON.parse(event.data);
                 setLastFrame(frame);
@@ -177,7 +187,7 @@ export function useVisionWebSocket(staleTimeoutMs = 3000, enabled = true): UseVi
                         });
 
                         // Batasi 20 kartu saja agar memori aman dan tidak ngelag
-                        return updated.slice(0, 20);
+                        return updated;
                     });
                 }
                 resetStaleTimer();
@@ -217,6 +227,26 @@ export function useVisionWebSocket(staleTimeoutMs = 3000, enabled = true): UseVi
             }
         };
     }, [connect, clearStaleTimer]);
+
+    // Tab visibility listener: pause state on hide, resume on show
+    useEffect(() => {
+        const handleVisibility = () => {
+            const visible = document.visibilityState === 'visible';
+            tabVisibleRef.current = visible;
+
+            if (visible && pendingFrameRef.current) {
+                // Apply only the latest stashed frame (skip all intermediates)
+                const frame = pendingFrameRef.current;
+                pendingFrameRef.current = null;
+                setLastFrame(frame);
+                setDetections(frame.detections || []);
+                if (frame.telemetry) setTelemetry(frame.telemetry);
+                resetStaleTimer();
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibility);
+        return () => document.removeEventListener('visibilitychange', handleVisibility);
+    }, [resetStaleTimer]);
 
     return { detections, lastFrame, isConnected, frameCount, telemetry, detectionHistory };
 }

@@ -14,6 +14,7 @@ import {
   CheckCircle,
   Calendar,
   Clock,
+  ChevronLeft,
   ChevronRight,
   Filter,
   Search,
@@ -33,7 +34,8 @@ import {
   Ship,
   Plane as PlaneIcon,
   Waves,
-  Eye
+  Eye,
+  Target
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
@@ -41,7 +43,7 @@ import { Textarea } from './ui/textarea';
 import { Label } from './ui/label';
 import { useQuery } from '@apollo/client';
 import { GET_MISSIONS } from '../graphql/queries';
-import { missionSummary, Mission, Flight } from './shared-data';
+import { Mission, Flight } from './shared-data';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import LeafletDrawMap from './LeafletDrawMap';
 import FlightPathCanvas from './FlightPathCanvas';
@@ -78,11 +80,11 @@ const altitudeData = [
 ];
 
 const distributionData = [
-  { name: 'Structure Inspection', value: 35, color: '#0F4C75' },
-  { name: 'Crop Health', value: 25, color: '#22c55e' },
-  { name: 'Surveillance', value: 20, color: '#8b5cf6' },
-  { name: 'Inventory', value: 15, color: '#f59e0b' },
-  { name: 'Search & Rescue', value: 5, color: '#ef4444' },
+  { name: 'Dark Vessel', value: 1705, color: '#00E5FF' },
+  { name: 'AIS Off', value: 980, color: '#B388FF' },
+  { name: 'Speed Anomaly', value: 210, color: '#FFB300' },
+  { name: 'Identity Mismatch', value: 85, color: '#00E676' },
+  { name: 'Zone Violation', value: 60, color: '#FF5252' },
 ];
 
 // Sample AI detection results
@@ -311,32 +313,24 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
         missionCode: m.missionCode ?? '',
         category: m.category ?? 'Reconnaissance',
         startDate: m.startedAt?.split('T')[0] ?? m.createdAt?.split('T')[0] ?? new Date().toISOString().split('T')[0],
-        // Duration from Postgres (minutes), fallback 0
         totalDuration: m.duration ?? 0,
-        // Derived fields that don't exist in Postgres — safe defaults
         totalFlights: safeFlights.length || 1,
         totalDetections: m.totalDetections ?? 0,
         totalAnomalies: m.totalAnomalies ?? 0,
         coverageArea: m.coverageArea ?? 0,
         droneType: m.asset?.category ?? m.asset?.type ?? 'UAV',
-        // Build a synthetic flights array from asset/pilot so the UI doesn't crash
         flights: safeFlights.length > 0 ? safeFlights : [{
           id: `flight-${m.id}`,
           drone: m.asset?.name ?? 'Unassigned',
           pilot: m.pilot?.name ?? 'Unassigned',
           aiModel: 'YOLOv8-Maritime',
-          distance: 0,
-          duration: m.duration ?? 0,
-          detections: 0,
-          anomalies: 0,
-          maxAltitude: 0,
-          avgSpeed: 0,
-          videoId: '',
+          distance: 0, duration: m.duration ?? 0,
+          detections: 0, anomalies: 0, maxAltitude: 0, avgSpeed: 0, videoId: '',
         }],
         areaPolygon: safePoly,
-        // Asset & Pilot refs from GraphQL
         asset: m.asset ?? null,
         pilot: m.pilot ?? null,
+        snapshots: Array.isArray(m.snapshots) ? m.snapshots : [],
         createdAt: m.createdAt ?? '',
         startedAt: m.startedAt ?? '',
         endedAt: m.endedAt ?? '',
@@ -344,12 +338,129 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
     });
   }, [data]);
 
+  // DYNAMIC: Real-time aggregation from live Postgres + Snapshot data
+  const dynamicSummary = useMemo(() => {
+    const total = missions.length;
+    const uav = missions.filter((m: any) => (m?.droneType ?? 'UAV').toUpperCase() === 'UAV').length;
+    const auv = total - uav;
+
+    // BULLETPROOF status classification — every mission in exactly ONE bucket
+    let completed = 0;
+    let live = 0;
+    let pending = 0;
+    missions.forEach((m: any) => {
+      const stat = String(m?.status || '').toUpperCase().trim();
+      const hasDuration = (Number(m?.duration) || 0) > 0;
+      const hasEndedAt = !!m?.endedAt;
+
+      if (stat === 'COMPLETED' || stat === 'SUCCESS' || stat.includes('COMPLETE') || (hasEndedAt && hasDuration)) {
+        completed++;
+      } else if (stat === 'LIVE' || stat === 'ACTIVE' || stat.includes('LIVE')) {
+        live++;
+      } else {
+        // PENDING, ABORTED, unknown, empty → pending
+        pending++;
+      }
+    });
+
+    // AI: sum snapshot counts across all missions
+    const allSnapshots = missions.flatMap((m: any) => Array.isArray(m?.snapshots) ? m.snapshots : []);
+    const totalHits = allSnapshots.length > 0
+      ? allSnapshots.length
+      : missions.reduce((acc: number, m: any) => acc + (Number(m?.totalDetections) || 0), 0);
+    const avgConfidence = allSnapshots.length > 0
+      ? Math.round((allSnapshots.reduce((sum: number, s: any) => sum + (Number(s?.confidence) || 0), 0) / allSnapshots.length) * 10) / 10
+      : 0;
+
+    // Unique assets
+    const uniqueAssetIds = new Set(missions.map((m: any) => m?.asset?.id).filter(Boolean));
+    const uniqueAssets = uniqueAssetIds.size;
+
+    // Coverage — smart fallback: if DB returns 0, estimate from duration + snapshots
+    const area = missions.reduce((acc: number, m: any) => {
+      const dbArea = Number(m?.coverageArea) || 0;
+      if (dbArea > 0) return acc + dbArea;
+      // Fallback: ~1.5 km² per minute + 0.05 per snapshot
+      const dur = Number(m?.duration) || 0;
+      const snaps = Array.isArray(m?.snapshots) ? m.snapshots.length : 0;
+      return acc + (dur * 1.5) + (snaps * 0.05);
+    }, 0);
+
+    return {
+      totalMissions: total,
+      uavMissions: uav,
+      auvMissions: auv,
+      completed,
+      pending,
+      live,
+      successRate: total > 0 ? Math.round((completed / total) * 100) : 0,
+      totalHits,
+      avgConfidence,
+      uniqueAssets,
+      totalArea: area,
+    };
+  }, [missions]);
+
+  // DYNAMIC: Group ALL snapshots by CLIP classification for BarChart
+  const dynamicDistributionData = useMemo(() => {
+    const colors = ['#00E5FF', '#B388FF', '#FFB300', '#00E676', '#FF5252', '#FF6E40', '#64FFDA', '#EA80FC'];
+    const classMap: Record<string, number> = {};
+    missions.forEach((m: any) => {
+      (Array.isArray(m?.snapshots) ? m.snapshots : []).forEach((s: any) => {
+        const cls = s?.classification ?? 'Unclassified';
+        classMap[cls] = (classMap[cls] ?? 0) + 1;
+      });
+    });
+    // If no snapshots at all, show placeholder
+    if (Object.keys(classMap).length === 0) {
+      return [{ name: 'No Detections', value: 0, color: '#334155' }];
+    }
+    return Object.entries(classMap)
+      .sort(([, a], [, b]) => b - a)
+      .map(([name, value], i) => ({ name, value, color: colors[i % colors.length] }));
+  }, [missions]);
+
+  // DYNAMIC: Device operation — group by asset name, sum duration (hours)
+  const deviceOperationData = useMemo(() => {
+    const deviceColors = ['#3B82F6', '#F97316', '#22c55e', '#A855F7', '#EF4444', '#06b6d4', '#f59e0b', '#ec4899'];
+    const deviceMap: Record<string, { name: string; type: string; minutes: number }> = {};
+    missions.forEach((m: any) => {
+      const deviceName = m?.asset?.name ?? 'Unknown';
+      const deviceType = m?.droneType ?? 'UAV';
+      if (!deviceMap[deviceName]) {
+        deviceMap[deviceName] = { name: deviceName, type: deviceType, minutes: 0 };
+      }
+      deviceMap[deviceName].minutes += (Number(m?.duration) || 0);
+    });
+    const devices = Object.values(deviceMap);
+    const pieData = devices.map((d, i) => ({
+      id: i,
+      value: Math.round((d.minutes / 60) * 10) / 10,
+      label: d.name,
+      color: deviceColors[i % deviceColors.length],
+    }));
+    return { totalDevices: devices.length, devices, pieData };
+  }, [missions]);
+
+  // Pagination with configurable rows per page
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(5);
+  const totalPages = Math.max(1, Math.ceil(missions.length / itemsPerPage));
+  const paginatedMissions = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return missions.slice(start, start + itemsPerPage);
+  }, [missions, currentPage, itemsPerPage]);
+
+  // Reset to page 1 when data changes
+  useEffect(() => { setCurrentPage(1); }, [missions.length]);
+
   const [selectedMission, setSelectedMission] = useState<any | null>(null);
   const [isDetailDialogOpen, setIsDetailDialogOpen] = useState(false);
   const [isAnalyzeOpen, setIsAnalyzeOpen] = useState(false);
   const [isReplayOpen, setIsReplayOpen] = useState(false);
+  const [zoomedReplayImage, setZoomedReplayImage] = useState<string | null>(null);
   const [aoiNotes, setAoiNotes] = useState('');
-  const [analyzedMission, setAnalyzedMission] = useState<any | null>(null);
+  const [analyzedMission, setAnalyzedMission] = useState<typeof missions[0] | null>(null);
   const [showAIS, setShowAIS] = useState(true);
   const [showADSB, setShowADSB] = useState(true);
   const [showENC, setShowENC] = useState(false);
@@ -419,24 +530,18 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'live': return '#22c55e';
-      case 'active': return '#3b82f6';
-      case 'pending': return '#eab308';
-      case 'success': case 'completed': return '#22c55e';
+      case 'success': return '#22c55e';
       case 'partial': return '#D4E268';
-      case 'failed': case 'aborted': return '#ef4444';
+      case 'failed': return '#ef4444';
       default: return '#6b7280';
     }
   };
 
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case 'live': return Activity;
-      case 'active': return Play;
-      case 'pending': return Clock;
-      case 'success': case 'completed': return CheckCircle;
+      case 'success': return CheckCircle;
       case 'partial': return Clock;
-      case 'failed': case 'aborted': return XCircle;
+      case 'failed': return XCircle;
       default: return Clock;
     }
   };
@@ -478,7 +583,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
     }, 150);
   };
 
-  const handleReplayMission = (mission: any) => {
+  const handleReplayMission = (mission: typeof missions[0]) => {
     setSelectedMission(mission);
     setIsReplayOpen(true);
   };
@@ -495,7 +600,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
     }, 100);
   };
 
-  const openReplaySheet = (mission: any) => {
+  const openReplaySheet = (mission: typeof missions[0]) => {
     setIsDetailDialogOpen(false); // Close dialog first
     setTimeout(() => {
       setSelectedMission(mission);
@@ -503,30 +608,10 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
     }, 100);
   };
 
-  const openDetailDialog = (mission: any) => {
+  const openDetailDialog = (mission: typeof missions[0]) => {
     setSelectedMission(mission);
     setIsDetailDialogOpen(true);
   };
-
-  // --- Loading / Error / Empty States ---
-  if (loading) {
-    return (
-      <div className="p-8 flex flex-col items-center justify-center min-h-[60vh]">
-        <div className="w-12 h-12 border-4 border-[#21A68D]/30 border-t-[#21A68D] rounded-full animate-spin mb-4" />
-        <p className="text-muted-foreground text-sm">Loading missions from database...</p>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="p-8 flex flex-col items-center justify-center min-h-[60vh]">
-        <XCircle className="w-12 h-12 text-red-500 mb-4" />
-        <p className="text-red-400 text-sm font-bold">Failed to fetch missions</p>
-        <p className="text-muted-foreground text-xs mt-2 max-w-md text-center">{error.message}</p>
-      </div>
-    );
-  }
 
   return (
     <div className="p-4 md:p-8 space-y-6 bg-[#0a0e1a] min-h-full pb-20">
@@ -568,25 +653,25 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
             <div className="space-y-0.5">
               <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-[0.2em]">Fleet Operations</p>
               <div className="flex items-baseline gap-2">
-                <h3 className="text-3xl font-black text-white tracking-tighter">{missionSummary.totalMissions}</h3>
-                <span className="text-[10px] text-[#21A68D] font-bold bg-[#21A68D]/10 px-1.5 py-0.5 rounded">+12.4%</span>
+                <h3 className="text-3xl font-black text-white tracking-tighter">{dynamicSummary.totalMissions}</h3>
+                <span className="text-[10px] text-[#21A68D] font-bold bg-[#21A68D]/10 px-1.5 py-0.5 rounded">{dynamicSummary.uniqueAssets} Assets</span>
               </div>
             </div>
             <div className="mt-4 grid grid-cols-2 gap-3">
               <div className="p-3 bg-white/[0.03] rounded-xl border border-white/[0.05] group-hover:bg-white/[0.05] transition-colors">
                 <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-1">UAV</p>
-                <p className="text-xl font-bold text-white tracking-tight">{missionSummary.uavMissions}</p>
+                <p className="text-xl font-bold text-white tracking-tight">{dynamicSummary.uavMissions}</p>
               </div>
               <div className="p-3 bg-white/[0.03] rounded-xl border border-white/[0.05] group-hover:bg-white/[0.05] transition-colors">
                 <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-1">AUV</p>
-                <p className="text-xl font-bold text-white tracking-tight">{missionSummary.auvMissions}</p>
+                <p className="text-xl font-bold text-white tracking-tight">{dynamicSummary.auvMissions}</p>
               </div>
             </div>
           </div>
           <div className="absolute bottom-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-[#21A68D] to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
         </Card>
 
-        {/* Operational Success Card */}
+        {/* Mission Status Comparison Card */}
         <Card className="group relative overflow-hidden bg-[#0f172a]/60 backdrop-blur-xl border border-white/10 p-0 hover:border-blue-500/50 transition-all duration-500 shadow-2xl">
           <div className="p-5">
             <div className="flex justify-between items-start mb-4">
@@ -594,24 +679,56 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                 <CheckCircle className="w-6 h-6 text-blue-400" />
               </div>
               <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/20 text-[10px] px-2 py-0.5 uppercase tracking-widest font-bold">
-                Efficiency
+                Comparison
               </Badge>
             </div>
             <div className="space-y-0.5">
-              <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-[0.2em]">Operational success</p>
+              <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-[0.2em]">Mission Status</p>
               <div className="flex items-baseline gap-2">
-                <h3 className="text-3xl font-black text-white tracking-tighter">{missionSummary.successRate}%</h3>
-                <span className="text-[10px] text-blue-400 font-bold bg-blue-500/10 px-1.5 py-0.5 rounded">High</span>
+                <h3 className="text-3xl font-black text-white tracking-tighter">{missions.length}</h3>
+                <span className="text-[10px] text-muted-foreground font-bold uppercase">Total Missions</span>
               </div>
             </div>
-            <div className="mt-5">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[11px] text-muted-foreground uppercase font-bold tracking-wider">Historical Trend</p>
-                <span className="text-[10px] text-blue-400 font-bold uppercase">Stable Performance</span>
+            <div className="mt-4 space-y-3">
+              {/* Progress Bar */}
+              <div className="w-full h-3 bg-white/5 rounded-full overflow-hidden border border-white/5 flex">
+                <div
+                  className="h-full bg-gradient-to-r from-[#22c55e] to-[#4ade80] transition-all duration-1000"
+                  style={{ width: `${dynamicSummary.totalMissions > 0 ? (dynamicSummary.completed / dynamicSummary.totalMissions) * 100 : 0}%` }}
+                ></div>
+                <div
+                  className="h-full bg-gradient-to-r from-[#f59e0b] to-[#fbbf24] transition-all duration-1000"
+                  style={{ width: `${dynamicSummary.totalMissions > 0 ? (dynamicSummary.pending / dynamicSummary.totalMissions) * 100 : 0}%` }}
+                ></div>
+                <div
+                  className="h-full bg-gradient-to-r from-[#3b82f6] to-[#60a5fa] transition-all duration-1000"
+                  style={{ width: `${dynamicSummary.totalMissions > 0 ? (dynamicSummary.live / dynamicSummary.totalMissions) * 100 : 0}%` }}
+                ></div>
               </div>
-              <p className="text-xs text-muted-foreground italic leading-relaxed">
-                Analysis of {missions.filter((m: any) => m.status === 'completed').length} finalized operations shows strong mission coherence and outcome stability.
-              </p>
+              {/* Stats */}
+              <div className="grid grid-cols-3 gap-2">
+                <div className="p-2.5 bg-white/[0.03] rounded-xl border border-white/[0.05]">
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="w-2.5 h-2.5 rounded-full bg-[#22c55e]"></div>
+                    <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Completed</span>
+                  </div>
+                  <p className="text-xl font-black text-[#22c55e]">{dynamicSummary.completed}</p>
+                </div>
+                <div className="p-2.5 bg-white/[0.03] rounded-xl border border-white/[0.05]">
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="w-2.5 h-2.5 rounded-full bg-[#f59e0b]"></div>
+                    <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Pending</span>
+                  </div>
+                  <p className="text-xl font-black text-[#f59e0b]">{dynamicSummary.pending}</p>
+                </div>
+                <div className="p-2.5 bg-white/[0.03] rounded-xl border border-white/[0.05]">
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="w-2.5 h-2.5 rounded-full bg-[#3b82f6]"></div>
+                    <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Live</span>
+                  </div>
+                  <p className="text-xl font-black text-[#3b82f6]">{dynamicSummary.live}</p>
+                </div>
+              </div>
             </div>
           </div>
           <div className="absolute bottom-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
@@ -631,24 +748,24 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
             <div className="space-y-0.5">
               <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-[0.2em]">AI detections</p>
               <div className="flex items-baseline gap-2">
-                <h3 className="text-3xl font-black text-white tracking-tighter">{missionSummary.totalDetections}</h3>
-                <span className="text-[10px] text-[#D4E268] font-bold bg-[#D4E268]/10 px-1.5 py-0.5 rounded">↑ 8.2%</span>
+                <h3 className="text-3xl font-black text-white tracking-tighter">{dynamicSummary.totalHits}</h3>
+                <span className="text-[10px] text-muted-foreground font-bold uppercase">Total Hits</span>
               </div>
             </div>
             <div className="mt-5 space-y-3">
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-[11px] text-muted-foreground uppercase font-bold tracking-wider">Avg Prediction Confidence</span>
-                  <span className="text-[11px] text-[#D4E268] font-black uppercase">94.2%</span>
+                  <span className="text-[11px] text-[#D4E268] font-black uppercase">{dynamicSummary.avgConfidence}%</span>
                 </div>
                 <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden border border-white/5">
                   <div
                     className="h-full bg-gradient-to-r from-[#D4E268]/40 to-[#D4E268] transition-all duration-1000"
-                    style={{ width: '94.2%' }}
+                    style={{ width: `${dynamicSummary.avgConfidence}%` }}
                   ></div>
                 </div>
               </div>
-              <p className="text-[10px] text-muted-foreground/60 uppercase tracking-tighter font-bold">Across all active mission profiles</p>
+              <p className="text-[10px] text-muted-foreground/60 uppercase tracking-tighter font-bold">Across {dynamicSummary.totalMissions} mission profiles</p>
             </div>
           </div>
           <div className="absolute bottom-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-[#D4E268] to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
@@ -668,7 +785,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
             <div className="space-y-0.5">
               <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-[0.2em]">Territorial coverage</p>
               <div className="flex items-baseline gap-1">
-                <h3 className="text-3xl font-black text-white tracking-tighter">{missionSummary.totalArea.toFixed(1)}</h3>
+                <h3 className="text-3xl font-black text-white tracking-tighter">{dynamicSummary.totalArea.toFixed(1)}</h3>
                 <span className="text-[10px] text-muted-foreground font-black uppercase tracking-tighter ml-1">KM²</span>
               </div>
             </div>
@@ -677,7 +794,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                 <Layers className="w-5 h-5 text-purple-400" />
               </div>
               <p className="text-[11px] text-muted-foreground leading-[1.3] font-medium italic">
-                Equivalent to tracking across {Math.floor(missionSummary.totalArea / 0.5)} identified high-priority maritime zones
+                Equivalent to tracking across {Math.floor(dynamicSummary.totalArea / 0.5)} identified high-priority maritime zones
               </p>
             </div>
           </div>
@@ -700,53 +817,56 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
               Contextual Data
             </Badge>
           </div>
-          <div className="p-5">
-            <div className="flex flex-col md:flex-row items-center justify-between gap-6 mt-1">
-              <div className="w-full h-[230px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={distributionData}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={65}
-                      outerRadius={90}
-                      paddingAngle={5}
-                      dataKey="value"
-                      stroke="rgba(255,255,255,0.05)"
-                      strokeWidth={2}
-                    >
-                      {distributionData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} fillOpacity={0.9} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', fontSize: '11px' }}
-                      itemStyle={{ color: '#fff', fontWeight: 'bold' }}
-                    />
-                    <text x="50%" y="48%" textAnchor="middle" dominantBaseline="middle" className="fill-white text-[10px] font-bold opacity-40 uppercase tracking-widest">
-                      Operational
-                    </text>
-                    <text x="50%" y="55%" textAnchor="middle" dominantBaseline="middle" className="fill-[#21A68D] text-lg font-black">
-                      74%
-                    </text>
-                  </PieChart>
-                </ResponsiveContainer>
+          <div className="p-4">
+            {dynamicDistributionData.length === 0 || (dynamicDistributionData.length === 1 && dynamicDistributionData[0].value === 0) ? (
+              <div className="h-[260px] flex flex-col items-center justify-center gap-3">
+                <div className="w-16 h-16 rounded-2xl bg-white/[0.03] border border-white/[0.08] flex items-center justify-center">
+                  <Eye className="w-8 h-8 text-muted-foreground/20" />
+                </div>
+                <p className="text-sm font-bold text-muted-foreground/40 uppercase tracking-widest">No Intel Available</p>
+                <p className="text-[10px] text-muted-foreground/30">AI classification data will appear after missions with CLIP detections</p>
               </div>
-
-              {/* Custom Legend */}
-              <div className="w-full md:w-auto flex flex-col gap-2 min-w-[190px]">
-                {distributionData.map((item, i) => (
-                  <div key={i} className="flex items-center justify-between gap-3 p-1.5 px-2.5 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 transition-colors">
-                    <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full" style={{ backgroundColor: item.color }}></div>
-                      <span className="text-[10px] font-bold text-white/80 uppercase tracking-tighter">{item.name}</span>
-                    </div>
-                    <span className="text-[10px] font-black text-white">{item.value}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart
+                  data={dynamicDistributionData}
+                  layout="vertical"
+                  margin={{ left: 10, right: 20, top: 5, bottom: 5 }}
+                  barCategoryGap="20%"
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
+                  <XAxis
+                    type="number"
+                    tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10 }}
+                    axisLine={{ stroke: 'rgba(255,255,255,0.1)' }}
+                    tickLine={{ stroke: 'rgba(255,255,255,0.1)' }}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    tick={{ fill: 'rgba(255,255,255,0.85)', fontSize: 12, fontWeight: 600 }}
+                    axisLine={{ stroke: 'rgba(255,255,255,0.1)' }}
+                    tickLine={false}
+                    width={130}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#1e293b',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 8,
+                      color: '#fff',
+                      fontSize: 12,
+                    }}
+                    cursor={{ fill: 'rgba(255,255,255,0.05)' }}
+                  />
+                  <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={20}>
+                    {dynamicDistributionData.map((entry: any, index: number) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </Card>
 
@@ -757,58 +877,63 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
               <div className="p-2 bg-[#21A68D]/10 rounded-lg">
                 <Clock className="w-5 h-5 text-[#21A68D]" />
               </div>
-              <h3 className="text-sm font-black text-white uppercase tracking-widest">Flight Persistence Metrics</h3>
+              <h3 className="text-sm font-black text-white uppercase tracking-widest">Device Operation</h3>
             </div>
             <Badge variant="outline" className="border-white/10 text-[#21A68D] text-[9px] uppercase font-bold tracking-tighter">
               Historical Cycle
             </Badge>
           </div>
           <div className="p-5">
-            <div className="h-[230px] w-full mt-1">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={missions.slice(-6)} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#21A68D" stopOpacity={0.4} />
-                      <stop offset="95%" stopColor="#21A68D" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="lineColor" x1="0" y1="0" x2="1" y2="0">
-                      <stop offset="0%" stopColor="#21A68D" />
-                      <stop offset="100%" stopColor="#6EE7B7" />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
-                  <XAxis
-                    dataKey="id"
-                    tick={{ fill: '#64748b', fontSize: 9, fontWeight: 'bold' }}
-                    axisLine={false}
-                    tickLine={false}
-                    tickFormatter={(value) => `${String(value ?? '').split('-').pop() ?? ''}`}
-                  />
-                  <YAxis hide />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px' }}
-                    labelStyle={{ color: '#21A68D', fontWeight: 'bold', fontSize: '10px' }}
-                    itemStyle={{ color: '#fff', fontSize: '11px' }}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="totalDuration"
-                    stroke="url(#lineColor)"
-                    strokeWidth={3}
-                    fillOpacity={1}
-                    fill="url(#areaGradient)"
-                    animationDuration={2000}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="mt-4 flex items-center justify-center gap-6">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-[#21A68D]"></div>
-                <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Active Operations (Minutes)</span>
+            {deviceOperationData.pieData.length === 0 || deviceOperationData.pieData.every((d: any) => (Number(d?.value) || 0) === 0) ? (
+              <div className="h-[230px] flex flex-col items-center justify-center gap-3">
+                <div className="w-16 h-16 rounded-2xl bg-white/[0.03] border border-white/[0.08] flex items-center justify-center">
+                  <Clock className="w-8 h-8 text-muted-foreground/20" />
+                </div>
+                <p className="text-sm font-bold text-muted-foreground/40 uppercase tracking-widest">No Flight Data</p>
+                <p className="text-[10px] text-muted-foreground/30">Device operation hours will appear after completed missions</p>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="h-[230px] w-full mt-1 flex items-center justify-center relative">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={deviceOperationData.pieData}
+                        cx="50%" cy="50%"
+                        innerRadius={65} outerRadius={90}
+                        paddingAngle={5} dataKey="value"
+                        stroke="rgba(255,255,255,0.05)" strokeWidth={2}
+                      >
+                        {deviceOperationData.pieData.map((entry: any, index: number) => (
+                          <Cell key={`dev-${index}`} fill={entry.color} fillOpacity={0.9} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={{ backgroundColor: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', fontSize: '11px' }}
+                        itemStyle={{ color: '#fff', fontWeight: 'bold' }}
+                      />
+                      <text x="50%" y="48%" textAnchor="middle" dominantBaseline="middle" className="fill-white text-[10px] font-bold opacity-40 uppercase tracking-widest">
+                        Devices
+                      </text>
+                      <text x="50%" y="55%" textAnchor="middle" dominantBaseline="middle" className="fill-[#21A68D] text-lg font-black">
+                        {deviceOperationData.totalDevices}
+                      </text>
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  {deviceOperationData.pieData.map((device: any) => (
+                    <div key={device.id} className="p-2.5 bg-white/[0.03] rounded-xl border border-white/[0.05] flex items-center gap-3">
+                      <div className="w-3 h-8 rounded" style={{ backgroundColor: device.color }}></div>
+                      <div>
+                        <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">{device.label}</p>
+                        <p className="text-sm font-black text-white">{device.value} <span className="text-[10px] text-muted-foreground font-bold">Hours</span></p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </Card>
       </div>
@@ -834,7 +959,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
             <table className="w-full text-left">
               <thead className="bg-[#0a0e1a]/80 text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b border-border/20">
                 <tr>
-                  <th className="px-5 py-3">Status & Mission ID</th>
+                  <th className="pl-6 pr-5 py-3">Status & Mission ID</th>
                   <th className="px-5 py-3">Operation Detail</th>
                   <th className="px-5 py-3">Assets</th>
                   <th className="px-5 py-3 text-center">AI Impact</th>
@@ -842,7 +967,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/20">
-                {missions.length === 0 && (
+                {paginatedMissions.length === 0 && missions.length === 0 && (
                   <tr>
                     <td colSpan={5} className="px-5 py-16 text-center">
                       <div className="flex flex-col items-center gap-3">
@@ -853,14 +978,13 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                     </td>
                   </tr>
                 )}
-                {missions.map((mission: any) => {
+                {paginatedMissions.map((mission: typeof missions[0]) => {
                   const StatusIcon = getStatusIcon(mission.status);
                   const statusColor = getStatusColor(mission.status);
-                  const safeFlights = Array.isArray(mission.flights) ? mission.flights : [];
 
                   return (
                     <tr key={mission.id} className="hover:bg-[#21A68D]/5 group transition-all duration-200">
-                      <td className="px-5 py-3.5">
+                      <td className="pl-6 pr-5 py-3.5">
                         <div className="flex items-center gap-4">
                           <div
                             className="w-10 h-10 rounded-full flex items-center justify-center border-2"
@@ -869,8 +993,8 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                             <StatusIcon className="w-5 h-5" style={{ color: statusColor }} />
                           </div>
                           <div>
-                            <p className="text-[10px] text-muted-foreground font-bold tracking-tighter mb-0.5">{mission.missionCode || mission.id}</p>
-                            <p className="text-xs font-bold text-white group-hover:text-[#21A68D] transition-colors">{mission.name}</p>
+                            <p className="text-[10px] text-muted-foreground font-bold tracking-tighter mb-0.5">{mission?.missionCode || mission?.id || '—'}</p>
+                            <p className="text-xs font-bold text-white group-hover:text-[#21A68D] transition-colors">{mission?.name ?? 'Unnamed'}</p>
                           </div>
                         </div>
                       </td>
@@ -878,47 +1002,45 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                         <div className="space-y-1">
                           <div className="flex items-center gap-1.5 text-xs text-white/90">
                             <Clock className="w-3 h-3 text-muted-foreground" />
-                            <span>{mission.totalDuration ?? 0}m Duration</span>
+                            <span>
+                              {(() => {
+                                const dur = Number(mission?.duration) || 0;
+                                if (dur > 0) return `${dur}m Duration`;
+                                const start = mission?.startedAt ? new Date(mission.startedAt).getTime() : 0;
+                                const end = mission?.endedAt ? new Date(mission.endedAt).getTime() : (mission?.status?.toLowerCase().includes('live') ? Date.now() : 0);
+                                if (start > 0 && end > 0) return `${Math.max(1, Math.round((end - start) / 60000))}m Duration`;
+                                return '—';
+                              })()}
+                            </span>
                           </div>
                           <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                             <MapPin className="w-3 h-3" />
-                            <span>{mission.startDate ? new Date(mission.startDate).toLocaleDateString() : 'N/A'} Operation</span>
+                            <span>{mission?.startedAt ? new Date(mission.startedAt).toLocaleDateString() : (mission?.createdAt ? new Date(mission.createdAt).toLocaleDateString() : 'N/A')} Operation</span>
                           </div>
                         </div>
                       </td>
                       <td className="px-5 py-3.5">
                         <div className="flex flex-col">
-                          <span className="text-xs font-medium text-white/80">{safeFlights[0]?.drone ?? mission.asset?.name ?? 'N/A'}</span>
-                          <span className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-tighter">{mission.droneType ?? 'UAV'} Fleet</span>
+                          <span className="text-xs font-medium text-white/80">{mission?.asset?.name ?? 'N/A'}</span>
+                          <span className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-tighter">{mission?.droneType ?? 'UAV'} Fleet</span>
                         </div>
                       </td>
                       <td className="px-5 py-3.5 text-center">
                         <div className="inline-flex flex-col items-center p-2 rounded-lg bg-white/5 border border-white/5 min-w-[3.5rem]">
-                          <span className="text-xs font-black text-[#D4E268]">{mission.totalDetections ?? 0}</span>
+                          <span className="text-xs font-black text-[#D4E268]">{(mission?.snapshots ?? []).length}</span>
                           <span className="text-[9px] text-muted-foreground font-bold uppercase tracking-tighter">Hits</span>
                         </div>
                       </td>
                       <td className="px-5 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-3">
-                          {mission.status === 'live' ? (
-                            <Button
-                              size="sm"
-                              className="h-8 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold"
-                              onClick={() => onNavigateToLive?.(mission.id)}
-                            >
-                              <Activity className="w-3.5 h-3.5 mr-1.5 animate-pulse" />
-                              Mission In Progress
-                            </Button>
-                          ) : (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-8 border-border/40 text-xs font-semibold hover:bg-[#21A68D] hover:text-white"
-                              onClick={() => openDetailDialog(mission)}
-                            >
-                              Telemetry Report
-                            </Button>
-                          )}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-8 border-border/40 text-xs font-semibold hover:bg-[#21A68D] hover:text-white"
+                            onClick={() => openDetailDialog(mission)}
+                          >
+                            Telemetry Report
+                          </Button>
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-white">
@@ -941,6 +1063,73 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
               </tbody>
             </table>
           </div>
+
+          {/* NEW: Pagination Controls */}
+          {missions.length > 0 && (
+            <div className="px-5 py-3 border-t border-white/5 flex items-center justify-between bg-[#0a0e1a]/40">
+              <div className="flex items-center gap-4">
+                <p className="text-xs text-muted-foreground">
+                  Showing{' '}
+                  <span className="text-white font-bold">{(currentPage - 1) * itemsPerPage + 1}</span>
+                  –
+                  <span className="text-white font-bold">{Math.min(currentPage * itemsPerPage, missions.length)}</span>
+                  {' '}of <span className="text-white font-bold">{missions.length}</span> missions
+                </p>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">Rows</span>
+                  <select
+                    value={itemsPerPage}
+                    onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                    className="h-7 px-2 text-xs bg-[#0a0e1a] border border-white/10 rounded-lg text-white focus:border-[#21A68D] focus:outline-none cursor-pointer"
+                  >
+                    {[5, 10, 50, 100].map(n => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 px-3 text-xs border-white/10 hover:bg-[#21A68D] hover:text-white hover:border-[#21A68D] disabled:opacity-30"
+                  disabled={currentPage <= 1}
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                >
+                  <ChevronLeft className="w-3.5 h-3.5 mr-1" />
+                  Prev
+                </Button>
+                {Array.from({ length: totalPages }, (_, i) => i + 1)
+                  .filter(page => page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1)
+                  .map((page, idx, arr) => (
+                    <React.Fragment key={page}>
+                      {idx > 0 && arr[idx - 1] !== page - 1 && (
+                        <span className="text-muted-foreground text-xs px-1">…</span>
+                      )}
+                      <button
+                        onClick={() => setCurrentPage(page)}
+                        className={`w-8 h-8 rounded-lg text-xs font-bold transition-all ${page === currentPage
+                          ? 'bg-[#21A68D] text-white shadow-lg shadow-[#21A68D]/25'
+                          : 'text-muted-foreground hover:text-white hover:bg-white/5'
+                          }`}
+                      >
+                        {page}
+                      </button>
+                    </React.Fragment>
+                  ))}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 px-3 text-xs border-white/10 hover:bg-[#21A68D] hover:text-white hover:border-[#21A68D] disabled:opacity-30"
+                  disabled={currentPage >= totalPages}
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                >
+                  Next
+                  <ChevronRight className="w-3.5 h-3.5 ml-1" />
+                </Button>
+              </div>
+            </div>
+          )}
         </Card>
 
         {/* Mission Detail Dialog - Controlled */}
@@ -956,7 +1145,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                     </Badge>
                   </DialogTitle>
                   <DialogDescription>
-                    Mission ID: {selectedMission.missionCode || selectedMission.id} - {selectedMission.startDate ? new Date(selectedMission.startDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A'}
+                    Mission ID: {selectedMission.id} - {new Date(selectedMission.startDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
                   </DialogDescription>
                 </DialogHeader>
 
@@ -967,27 +1156,27 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                     <div className="grid grid-cols-2 gap-4 text-sm">
                       <div>
                         <p className="text-muted-foreground">Mission ID</p>
-                        <p className="mt-1">{selectedMission.missionCode || selectedMission.id}</p>
+                        <p className="mt-1">{selectedMission.id}</p>
                       </div>
                       <div>
                         <p className="text-muted-foreground">Date</p>
-                        <p className="mt-1">{selectedMission.startDate ? new Date(selectedMission.startDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A'}</p>
+                        <p className="mt-1">{selectedMission?.startedAt ? new Date(selectedMission.startedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : (selectedMission?.createdAt ? new Date(selectedMission.createdAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A')}</p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground">Drone</p>
-                        <p className="mt-1">{(selectedMission?.flights ?? [])[0]?.drone ?? selectedMission?.asset?.name ?? 'N/A'}</p>
+                        <p className="text-muted-foreground">Asset</p>
+                        <p className="mt-1">{selectedMission?.asset?.name || 'N/A'}</p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground">AI Model</p>
-                        <p className="mt-1">{(selectedMission?.flights ?? [])[0]?.aiModel ?? 'N/A'}</p>
+                        <p className="text-muted-foreground">Category</p>
+                        <p className="mt-1">{selectedMission?.category || 'N/A'}</p>
                       </div>
                       <div>
                         <p className="text-muted-foreground">Duration</p>
-                        <p className="mt-1">{selectedMission?.totalDuration ?? 0} minutes</p>
+                        <p className="mt-1">{Number(selectedMission?.duration) || '—'} minutes</p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground">Total Distance</p>
-                        <p className="mt-1">{(selectedMission?.flights ?? []).reduce((acc: number, f: any) => acc + (f?.distance ?? 0), 0).toFixed(1)} km</p>
+                        <p className="text-muted-foreground">Coverage Area</p>
+                        <p className="mt-1">{Number(selectedMission?.coverageArea || 0).toFixed(1)} km²</p>
                       </div>
                     </div>
                   </Card>
@@ -998,15 +1187,15 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                     <div className="grid grid-cols-3 gap-4 text-center">
                       <div>
                         <p className="text-xs text-muted-foreground">Total Duration</p>
-                        <p className="text-lg mt-1">{selectedMission?.totalDuration ?? 0} min</p>
+                        <p className="text-lg mt-1">{Number(selectedMission?.duration) || '—'} min</p>
                       </div>
                       <div>
-                        <p className="text-xs text-muted-foreground">Distance</p>
-                        <p className="text-lg mt-1">{(selectedMission?.flights ?? []).reduce((acc: number, f: any) => acc + (f?.distance ?? 0), 0).toFixed(1)} km</p>
+                        <p className="text-xs text-muted-foreground">Coverage</p>
+                        <p className="text-lg mt-1">{Number(selectedMission?.coverageArea || 0).toFixed(1)} km²</p>
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">Detections</p>
-                        <p className="text-lg mt-1" style={{ color: '#21A68D' }}>{selectedMission?.totalDetections ?? 0}</p>
+                        <p className="text-lg mt-1" style={{ color: '#21A68D' }}>{(selectedMission?.snapshots ?? []).length}</p>
                       </div>
                     </div>
                   </Card>
@@ -1062,19 +1251,19 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div>
                       <p className="text-muted-foreground">Drone</p>
-                      <p className="mt-1">{(selectedMission?.flights ?? [])[0]?.drone ?? selectedMission?.asset?.name ?? 'N/A'}</p>
+                      <p className="mt-1">{selectedMission?.asset?.name || 'N/A'}</p>
                     </div>
                     <div>
                       <p className="text-muted-foreground">Duration</p>
-                      <p className="mt-1">{selectedMission?.totalDuration ?? 0} min</p>
+                      <p className="mt-1">{Number(selectedMission?.duration) || '—'} min</p>
                     </div>
                     <div>
-                      <p className="text-muted-foreground">Distance</p>
-                      <p className="mt-1">{(selectedMission?.flights ?? []).reduce((acc: number, f: any) => acc + (f?.distance ?? 0), 0).toFixed(1)} km</p>
+                      <p className="text-muted-foreground">Coverage</p>
+                      <p className="mt-1">{Number(selectedMission?.coverageArea || 0).toFixed(1)} km²</p>
                     </div>
                     <div>
                       <p className="text-muted-foreground">Detections</p>
-                      <p className="mt-1">{selectedMission?.totalDetections ?? 0}</p>
+                      <p className="mt-1">{(selectedMission?.snapshots ?? []).length}</p>
                     </div>
                   </div>
                 </Card>
@@ -1408,29 +1597,96 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                       Mission Recording Replay
                     </h3>
                     <div className="relative rounded-lg overflow-hidden bg-black aspect-video">
-                      <iframe
-                        src={`https://www.youtube.com/embed/${(selectedMission?.flights ?? [])[0]?.videoId || 'JxrGGacMlys'}?autoplay=1&mute=0&controls=1&showinfo=1&rel=0&modestbranding=1`}
-                        className="w-full h-full"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                        allowFullScreen
-                        title="Mission Replay Video"
-                        style={{ border: 'none' }}
-                      />
+                      {selectedMission?.videoPath ? (
+                        <video
+                          src={selectedMission.videoPath}
+                          controls
+                          autoPlay
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-[#0a0e1a]">
+                          <Play className="w-12 h-12 text-muted-foreground/20" />
+                          <p className="text-sm text-muted-foreground/40 font-bold uppercase tracking-wider">No Recording Available</p>
+                          <p className="text-[10px] text-muted-foreground/30">Video will be linked after mission processing</p>
+                        </div>
+                      )}
                     </div>
                     <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
                       <div className="p-2 rounded bg-background border border-border text-center">
                         <p className="text-muted-foreground">Duration</p>
-                        <p className="mt-1">{selectedMission?.totalDuration ?? 0} min</p>
-                      </div>
-                      <div className="p-2 rounded bg-background border border-border text-center">
-                        <p className="text-muted-foreground">Distance</p>
-                        <p className="mt-1">{(selectedMission?.flights ?? []).reduce((acc: number, f: any) => acc + (f?.distance ?? 0), 0).toFixed(1)} km</p>
+                        <p className="mt-1">{Number(selectedMission?.duration) || '—'} min</p>
                       </div>
                       <div className="p-2 rounded bg-background border border-border text-center">
                         <p className="text-muted-foreground">Detections</p>
-                        <p className="mt-1">{selectedMission?.totalDetections ?? 0}</p>
+                        <p className="mt-1">{(selectedMission?.snapshots ?? []).length}</p>
+                      </div>
+                      <div className="p-2 rounded bg-background border border-border text-center">
+                        <p className="text-muted-foreground">Coverage</p>
+                        <p className="mt-1">{Number(selectedMission?.coverageArea || 0).toFixed(1)} km²</p>
                       </div>
                     </div>
+                  </Card>
+
+                  {/* AI Snapshot Results */}
+                  <Card className="p-4 bg-muted/30">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-sm flex items-center gap-2" style={{ color: '#D4E268' }}>
+                        <BarChart3 className="w-4 h-4" />
+                        AI Snapshot Results
+                      </h3>
+                      <Badge variant="outline" className="text-[10px] border-[#D4E268]/30 text-[#D4E268]">
+                        {(selectedMission?.snapshots ?? []).length} DETECTIONS
+                      </Badge>
+                    </div>
+
+                    {(selectedMission?.snapshots ?? []).length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-10 gap-3">
+                        <BarChart3 className="w-10 h-10 text-muted-foreground/20" />
+                        <p className="text-sm text-muted-foreground/40 font-bold uppercase tracking-wider">No AI Detections</p>
+                        <p className="text-[10px] text-muted-foreground/30">No snapshots were captured during this mission</p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                        {(selectedMission?.snapshots ?? []).map((snapshot: any, idx: number) => (
+                          <div
+                            key={snapshot.id || idx}
+                            className="bg-[#0a0e1a]/80 rounded-lg border border-slate-700/50 overflow-hidden hover:border-[#21A68D]/60 hover:ring-1 hover:ring-[#21A68D]/40 transition-all group cursor-pointer"
+                            onClick={() => snapshot.snapshotUrl && setZoomedReplayImage(snapshot.snapshotUrl)}
+                          >                            <div className="relative aspect-video bg-slate-900">
+                              {snapshot.snapshotUrl ? (
+                                <img
+                                  src={snapshot.snapshotUrl}
+                                  alt={snapshot.classification || 'Detection'}
+                                  className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center">
+                                  <div className="text-center">
+                                    <Target className="w-6 h-6 text-[#D4E268]/20 mx-auto mb-1" />
+                                    <span className="text-muted-foreground/20 text-[9px] font-bold uppercase tracking-wider">No Image</span>
+                                  </div>
+                                </div>
+                              )}
+                              {/* Classification badge — top left */}
+                              <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-sm text-[9px] font-bold text-[#D4E268] uppercase tracking-wider">
+                                {snapshot.classification || 'Unknown'}
+                              </div>
+                              {/* Confidence badge — top right */}
+                              <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-sm text-[9px] font-mono text-white">
+                                {((Number(snapshot.confidence) || 0) * 100).toFixed(0)}%
+                              </div>
+                            </div>
+                            <div className="px-2.5 py-2 flex items-center justify-between">
+                              <span className="text-[10px] font-semibold text-white/70">Track #{snapshot.trackId || idx + 1}</span>
+                              <span className="text-[9px] text-muted-foreground font-mono">
+                                {snapshot.detectedAt ? new Date(snapshot.detectedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </Card>
 
                   {/* Flight Path Replay */}
@@ -1493,6 +1749,28 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
             </div>
           </SheetContent>
         </Sheet>
+
+        {/* TACTICAL ZOOM LIGHTBOX */}
+        {zoomedReplayImage && (
+          <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 cursor-zoom-out"
+            onClick={() => setZoomedReplayImage(null)}
+          >
+            <div className="relative max-w-5xl w-full flex flex-col items-end gap-3" onClick={e => e.stopPropagation()}>
+              <button
+                className="bg-red-600/90 hover:bg-red-500 text-white px-4 py-2 rounded-md font-bold text-xs uppercase tracking-widest transition-all shadow-lg border border-red-400 backdrop-blur-sm"
+                onClick={() => setZoomedReplayImage(null)}
+              >
+                CLOSE ✕
+              </button>
+              <img
+                src={zoomedReplayImage}
+                alt="Tactical Zoom — AI Detection"
+                className="w-full max-h-[85vh] object-contain rounded-lg border border-slate-600 shadow-2xl"
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

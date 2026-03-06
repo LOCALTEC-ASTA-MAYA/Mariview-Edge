@@ -14,6 +14,8 @@ export const GET_MISSIONS = gql`
       status
       areaPolygon
       duration
+      coverageArea
+      totalDetections
       asset {
         id
         name
@@ -28,10 +30,23 @@ export const GET_MISSIONS = gql`
         role
         email
       }
+      snapshots {
+        id
+        trackId
+        classification
+        confidence
+        snapshotUrl
+        bboxX1
+        bboxY1
+        bboxX2
+        bboxY2
+        detectedAt
+      }
       startedAt
       endedAt
       createdAt
       teamMemberIds
+      videoPath
     }
   }
 `;
@@ -199,6 +214,12 @@ export const ABORT_MISSION = gql`
 export const DELETE_MISSION = gql`
   mutation DeleteMission($id: ID!) {
     deleteMission(id: $id)
+  }
+`;
+
+export const DELETE_ALL_MISSIONS = gql`
+  mutation DeleteAllMissions {
+    deleteAllMissions
   }
 `;
 
