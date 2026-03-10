@@ -18,7 +18,6 @@ RUN apk --no-cache add ca-certificates tzdata ffmpeg
 WORKDIR /app
 
 COPY --from=builder /app/main .
-COPY test.mp4 /app/test.mp4
 
 EXPOSE 8080
 
