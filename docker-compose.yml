@@ -121,6 +121,8 @@ services:
       - CORS_ORIGIN=http://localhost:3000
     ports:
       - "8080:8080"
+    volumes:
+      - ./mariview-frontend/public/assets/drone.mp4:/app/drone.mp4:ro
     restart: unless-stopped
     networks:
       - locallitix-net

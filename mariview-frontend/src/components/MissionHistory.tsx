@@ -1,5 +1,6 @@
 import { Card } from './ui/card';
 import React, { useState, useEffect, useMemo } from 'react';
+import ReactDOM from 'react-dom';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { BarChart, Bar, LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
@@ -295,6 +296,34 @@ interface MissionHistoryProps {
   onNavigateToLive?: (missionId: string) => void;
 }
 
+/**
+ * calculateMissionDuration — single source of truth for mission duration (minutes).
+ * Priority: DB duration field → endedAt - startedAt → live running time → 0
+ */
+export function calculateMissionDuration(mission: any): number {
+  const dbDur = Number(mission?.totalDuration ?? mission?.duration);
+  if (dbDur > 0) return dbDur;
+  const s = mission?.startedAt ? new Date(mission.startedAt).getTime() : 0;
+  const isLive = String(mission?.status ?? '').toLowerCase().includes('live');
+  const e = mission?.endedAt
+    ? new Date(mission.endedAt).getTime()
+    : isLive ? Date.now() : 0;
+  if (s > 0 && e > 0) return Math.max(1, Math.round((e - s) / 60000));
+  return 0;
+}
+
+/**
+ * calculateMissionCoverage — single source of truth for coverage area (km²).
+ * Priority: DB coverageArea field → tactical estimate: 1.5 km²/min + 0.05/snapshot
+ */
+export function calculateMissionCoverage(mission: any, durationMins?: number): number {
+  const dbCov = Number(mission?.coverageArea);
+  if (dbCov > 0) return dbCov;
+  const dur = durationMins !== undefined ? durationMins : calculateMissionDuration(mission);
+  const snaps = Array.isArray(mission?.snapshots) ? mission.snapshots.length : (mission?.snapshots?.length || 0);
+  return parseFloat(((dur * 1.5) + (snaps * 0.05)).toFixed(2));
+}
+
 export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps) {
   const { loading, error, data } = useQuery(GET_MISSIONS);
 
@@ -334,6 +363,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
         createdAt: m.createdAt ?? '',
         startedAt: m.startedAt ?? '',
         endedAt: m.endedAt ?? '',
+        videoPath: m.videoPath ?? '',
       };
     });
   }, [data]);
@@ -376,14 +406,10 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
     const uniqueAssetIds = new Set(missions.map((m: any) => m?.asset?.id).filter(Boolean));
     const uniqueAssets = uniqueAssetIds.size;
 
-    // Coverage — smart fallback: if DB returns 0, estimate from duration + snapshots
+    // Coverage — uses calculateMissionCoverage so global total === sum of individual missions
     const area = missions.reduce((acc: number, m: any) => {
-      const dbArea = Number(m?.coverageArea) || 0;
-      if (dbArea > 0) return acc + dbArea;
-      // Fallback: ~1.5 km² per minute + 0.05 per snapshot
-      const dur = Number(m?.duration) || 0;
-      const snaps = Array.isArray(m?.snapshots) ? m.snapshots.length : 0;
-      return acc + (dur * 1.5) + (snaps * 0.05);
+      const dur = calculateMissionDuration(m);
+      return acc + calculateMissionCoverage(m, dur);
     }, 0);
 
     return {
@@ -425,22 +451,25 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
     const deviceColors = ['#3B82F6', '#F97316', '#22c55e', '#A855F7', '#EF4444', '#06b6d4', '#f59e0b', '#ec4899'];
     const deviceMap: Record<string, { name: string; type: string; minutes: number }> = {};
     missions.forEach((m: any) => {
-      const deviceName = m?.asset?.name ?? 'Unknown';
+      const deviceName = m?.asset?.name ?? 'Unknown Asset';
       const deviceType = m?.droneType ?? 'UAV';
       if (!deviceMap[deviceName]) {
         deviceMap[deviceName] = { name: deviceName, type: deviceType, minutes: 0 };
       }
-      deviceMap[deviceName].minutes += (Number(m?.duration) || 0);
+      // Use the same helper as the modal — includes timestamp fallback
+      deviceMap[deviceName].minutes += calculateMissionDuration(m);
     });
-    const devices = Object.values(deviceMap);
+    const devices = Object.values(deviceMap).filter(d => d.minutes > 0);
     const pieData = devices.map((d, i) => ({
       id: i,
-      value: Math.round((d.minutes / 60) * 10) / 10,
+      value: d.minutes,          // minutes — keeps sub-60min flights visible
       label: d.name,
       color: deviceColors[i % deviceColors.length],
     }));
-    return { totalDevices: devices.length, devices, pieData };
+    const totalMinutes = pieData.reduce((s, d) => s + d.value, 0);
+    return { totalDevices: devices.length, devices, pieData, totalMinutes };
   }, [missions]);
+
 
   // Pagination with configurable rows per page
   const [currentPage, setCurrentPage] = useState(1);
@@ -455,6 +484,17 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
   useEffect(() => { setCurrentPage(1); }, [missions.length]);
 
   const [selectedMission, setSelectedMission] = useState<any | null>(null);
+
+  // Single source of truth for modal display — delegates to module-level helpers
+  const displayDuration: string = (() => {
+    const d = calculateMissionDuration(selectedMission);
+    return d > 0 ? `${d}` : '—';
+  })();
+  const displayCoverage: string = calculateMissionCoverage(
+    selectedMission,
+    calculateMissionDuration(selectedMission)
+  ).toFixed(1);
+
   const [isDetailDialogOpen, setIsDetailDialogOpen] = useState(false);
   const [isAnalyzeOpen, setIsAnalyzeOpen] = useState(false);
   const [isReplayOpen, setIsReplayOpen] = useState(false);
@@ -621,7 +661,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
           <h1 className="text-3xl font-extrabold tracking-tight text-white mb-2">
             Mission Intelligence & <span className="text-[#21A68D]">History</span>
           </h1>
-          <p className="text-muted-foreground/80 font-medium">
+          <p className="text-muted-foreground/80 font-medium text-white">
             Operational archive and spatial intelligence analytics
           </p>
         </div>
@@ -884,7 +924,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
             </Badge>
           </div>
           <div className="p-5">
-            {deviceOperationData.pieData.length === 0 || deviceOperationData.pieData.every((d: any) => (Number(d?.value) || 0) === 0) ? (
+            {deviceOperationData.totalMinutes === 0 ? (
               <div className="h-[230px] flex flex-col items-center justify-center gap-3">
                 <div className="w-16 h-16 rounded-2xl bg-white/[0.03] border border-white/[0.08] flex items-center justify-center">
                   <Clock className="w-8 h-8 text-muted-foreground/20" />
@@ -927,7 +967,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                       <div className="w-3 h-8 rounded" style={{ backgroundColor: device.color }}></div>
                       <div>
                         <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">{device.label}</p>
-                        <p className="text-sm font-black text-white">{device.value} <span className="text-[10px] text-muted-foreground font-bold">Hours</span></p>
+                        <p className="text-sm font-black text-white">{device.value} <span className="text-[10px] text-muted-foreground font-bold">min</span></p>
                       </div>
                     </div>
                   ))}
@@ -1004,12 +1044,8 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                             <Clock className="w-3 h-3 text-muted-foreground" />
                             <span>
                               {(() => {
-                                const dur = Number(mission?.duration) || 0;
-                                if (dur > 0) return `${dur}m Duration`;
-                                const start = mission?.startedAt ? new Date(mission.startedAt).getTime() : 0;
-                                const end = mission?.endedAt ? new Date(mission.endedAt).getTime() : (mission?.status?.toLowerCase().includes('live') ? Date.now() : 0);
-                                if (start > 0 && end > 0) return `${Math.max(1, Math.round((end - start) / 60000))}m Duration`;
-                                return '—';
+                                const dur = calculateMissionDuration(mission);
+                                return dur > 0 ? `${dur}m Duration` : '—';
                               })()}
                             </span>
                           </div>
@@ -1145,7 +1181,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                     </Badge>
                   </DialogTitle>
                   <DialogDescription>
-                    Mission ID: {selectedMission.id} - {new Date(selectedMission.startDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+                    {selectedMission?.missionCode ?? selectedMission.id} &mdash; {new Date(selectedMission.startDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
                   </DialogDescription>
                 </DialogHeader>
 
@@ -1156,7 +1192,8 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                     <div className="grid grid-cols-2 gap-4 text-sm">
                       <div>
                         <p className="text-muted-foreground">Mission ID</p>
-                        <p className="mt-1">{selectedMission.id}</p>
+                        <p className="mt-1 font-mono font-semibold">{selectedMission?.missionCode ?? '—'}</p>
+                        <p className="mt-0.5 text-[10px] text-muted-foreground/50">System Ref: {selectedMission.id}</p>
                       </div>
                       <div>
                         <p className="text-muted-foreground">Date</p>
@@ -1172,11 +1209,11 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                       </div>
                       <div>
                         <p className="text-muted-foreground">Duration</p>
-                        <p className="mt-1">{Number(selectedMission?.duration) || '—'} minutes</p>
+                        <p className="mt-1">{displayDuration} minutes</p>
                       </div>
                       <div>
                         <p className="text-muted-foreground">Coverage Area</p>
-                        <p className="mt-1">{Number(selectedMission?.coverageArea || 0).toFixed(1)} km²</p>
+                        <p className="mt-1">{displayCoverage} km²</p>
                       </div>
                     </div>
                   </Card>
@@ -1187,11 +1224,11 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                     <div className="grid grid-cols-3 gap-4 text-center">
                       <div>
                         <p className="text-xs text-muted-foreground">Total Duration</p>
-                        <p className="text-lg mt-1">{Number(selectedMission?.duration) || '—'} min</p>
+                        <p className="text-lg mt-1">{displayDuration} min</p>
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">Coverage</p>
-                        <p className="text-lg mt-1">{Number(selectedMission?.coverageArea || 0).toFixed(1)} km²</p>
+                        <p className="text-lg mt-1">{displayCoverage} km²</p>
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">Detections</p>
@@ -1239,7 +1276,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
             <SheetHeader>
               <SheetTitle>Analyze Mission & Add AOI Information</SheetTitle>
               <SheetDescription>
-                {selectedMission && `Mission ID: ${selectedMission.id} - ${selectedMission.name}`}
+                {selectedMission && `${selectedMission?.missionCode ?? selectedMission.id} — ${selectedMission.name}`}
               </SheetDescription>
             </SheetHeader>
 
@@ -1255,11 +1292,11 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                     </div>
                     <div>
                       <p className="text-muted-foreground">Duration</p>
-                      <p className="mt-1">{Number(selectedMission?.duration) || '—'} min</p>
+                      <p className="mt-1">{displayDuration} min</p>
                     </div>
                     <div>
                       <p className="text-muted-foreground">Coverage</p>
-                      <p className="mt-1">{Number(selectedMission?.coverageArea || 0).toFixed(1)} km²</p>
+                      <p className="mt-1">{displayCoverage} km²</p>
                     </div>
                     <div>
                       <p className="text-muted-foreground">Detections</p>
@@ -1574,6 +1611,34 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                 </div>
               </div>
             </div>
+
+            {/* TACTICAL ZOOM — inside Sheet portal so Radix overlay never blocks it */}
+            {zoomedReplayImage && (
+              <div
+                style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.86)' }}
+                onClick={() => setZoomedReplayImage(null)}
+              >
+                <div
+                  style={{ position: 'relative', maxWidth: '640px', width: '90%', borderRadius: '12px', overflow: 'hidden', border: '1px solid rgba(33,166,141,0.4)', boxShadow: '0 25px 60px rgba(0,0,0,0.8)' }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <img
+                    src={zoomedReplayImage}
+                    alt="AI Detection Zoom"
+                    style={{ width: '100%', maxHeight: '70vh', objectFit: 'contain', display: 'block', background: '#0a0e1a' }}
+                  />
+                  <button
+                    onClick={() => setZoomedReplayImage(null)}
+                    style={{ position: 'absolute', top: '10px', right: '10px', width: '30px', height: '30px', borderRadius: '50%', background: 'rgba(220,38,38,0.95)', border: '1px solid #f87171', color: 'white', fontWeight: 900, fontSize: '15px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 10px rgba(0,0,0,0.6)' }}
+                  >
+                    ✕
+                  </button>
+                  <div style={{ padding: '6px 12px', background: 'rgba(10,14,26,0.95)', borderTop: '1px solid rgba(33,166,141,0.2)' }}>
+                    <span style={{ fontSize: '10px', color: '#21A68D', fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase' }}>AI Detection — Tactical Zoom</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </SheetContent>
         </Sheet>
 
@@ -1583,7 +1648,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
             <SheetHeader>
               <SheetTitle>Replay Mission</SheetTitle>
               <SheetDescription>
-                {selectedMission && `${selectedMission.name} - ${selectedMission.id}`}
+                {selectedMission && `${selectedMission.name} — ${selectedMission?.missionCode ?? selectedMission.id}`}
               </SheetDescription>
             </SheetHeader>
 
@@ -1596,26 +1661,37 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                       <Play className="w-4 h-4" />
                       Mission Recording Replay
                     </h3>
-                    <div className="relative rounded-lg overflow-hidden bg-black aspect-video">
+                    <div className="relative overflow-hidden">
                       {selectedMission?.videoPath ? (
                         <video
+                          key={selectedMission.videoPath}
                           src={selectedMission.videoPath}
                           controls
                           autoPlay
-                          className="w-full h-full object-cover"
+                          muted
+                          playsInline
+                          className="w-full aspect-video object-cover rounded-lg border border-slate-700 bg-slate-900 shadow-lg"
                         />
                       ) : (
-                        <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-[#0a0e1a]">
-                          <Play className="w-12 h-12 text-muted-foreground/20" />
-                          <p className="text-sm text-muted-foreground/40 font-bold uppercase tracking-wider">No Recording Available</p>
-                          <p className="text-[10px] text-muted-foreground/30">Video will be linked after mission processing</p>
+                        <div className="w-full aspect-video flex flex-col items-center justify-center gap-4 bg-slate-900 rounded-lg border border-slate-700/50 shadow-lg">
+                          <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/40">
+                            <Video className="w-10 h-10 text-slate-600" />
+                          </div>
+                          <div className="text-center">
+                            <p className="text-xs font-black text-slate-500 uppercase tracking-[0.25em]">Classified Footage</p>
+                            <p className="text-[10px] text-slate-600 mt-1 uppercase tracking-wider">No Recording Available</p>
+                          </div>
+                          <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-800/40 border border-slate-700/30">
+                            <div className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                            <span className="text-[9px] font-mono text-slate-600 uppercase tracking-widest">Video will be linked after mission processing</span>
+                          </div>
                         </div>
                       )}
                     </div>
                     <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
                       <div className="p-2 rounded bg-background border border-border text-center">
                         <p className="text-muted-foreground">Duration</p>
-                        <p className="mt-1">{Number(selectedMission?.duration) || '—'} min</p>
+                        <p className="mt-1">{displayDuration} min</p>
                       </div>
                       <div className="p-2 rounded bg-background border border-border text-center">
                         <p className="text-muted-foreground">Detections</p>
@@ -1623,7 +1699,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                       </div>
                       <div className="p-2 rounded bg-background border border-border text-center">
                         <p className="text-muted-foreground">Coverage</p>
-                        <p className="mt-1">{Number(selectedMission?.coverageArea || 0).toFixed(1)} km²</p>
+                        <p className="mt-1">{displayCoverage} km²</p>
                       </div>
                     </div>
                   </Card>
@@ -1750,27 +1826,24 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
           </SheetContent>
         </Sheet>
 
-        {/* TACTICAL ZOOM LIGHTBOX */}
-        {zoomedReplayImage && (
-          <div
-            className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 cursor-zoom-out"
-            onClick={() => setZoomedReplayImage(null)}
-          >
-            <div className="relative max-w-5xl w-full flex flex-col items-end gap-3" onClick={e => e.stopPropagation()}>
-              <button
-                className="bg-red-600/90 hover:bg-red-500 text-white px-4 py-2 rounded-md font-bold text-xs uppercase tracking-widest transition-all shadow-lg border border-red-400 backdrop-blur-sm"
-                onClick={() => setZoomedReplayImage(null)}
-              >
-                CLOSE ✕
-              </button>
+        {/* TACTICAL ZOOM — Dialog correctly stacks over Sheet via Radix focus-scope */}
+        <Dialog open={!!zoomedReplayImage} onOpenChange={(open) => { if (!open) setZoomedReplayImage(null); }}>
+          <DialogContent className="max-w-7xl w-[92vw] p-0 border-0 bg-transparent shadow-none overflow-hidden">
+            <div className="relative rounded-xl overflow-hidden border border-[#21A68D]/30 shadow-2xl bg-[#0a0e1a]">
               <img
-                src={zoomedReplayImage}
-                alt="Tactical Zoom — AI Detection"
-                className="w-full max-h-[85vh] object-contain rounded-lg border border-slate-600 shadow-2xl"
+                src={zoomedReplayImage ?? ''}
+                alt="AI Detection Zoom"
+                className="w-full object-contain max-h-[80vh] block"
+                style={{ background: '#0a0e1a' }}
               />
+              {/* Explicit red CLOSE button overlaid on image */}
+
+              <div className="px-3 py-2 border-t border-[#21A68D]/20 bg-[#0a0e1a]/95">
+                <span className="text-[10px] text-[#21A68D] font-bold uppercase tracking-widest">AI Detection — Tactical Zoom</span>
+              </div>
             </div>
-          </div>
-        )}
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

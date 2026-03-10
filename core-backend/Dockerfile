@@ -1,5 +1,5 @@
 # === Build Stage ===
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -13,11 +13,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o main cmd/api/main.go
 # === Runtime Stage ===
 FROM alpine:3.19
 
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata ffmpeg
 
 WORKDIR /app
 
 COPY --from=builder /app/main .
+COPY test.mp4 /app/test.mp4
 
 EXPOSE 8080
 

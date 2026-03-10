@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"locallitix-core/internal/domain"
@@ -16,11 +20,17 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"gorm.io/gorm"
 )
 
 // influxClient is set from main.go during initialization.
 var influxClient *influxclient.Client
+
+// activeRecordings tracks running ffmpeg DVR processes by mission ID.
+// Stored value: *exec.Cmd
+var activeRecordings sync.Map
 
 // SetInfluxClient injects the Phase 2 InfluxDB client for resolvers to use.
 func SetInfluxClient(c *influxclient.Client) {
@@ -474,6 +484,13 @@ func mutateUpdateMissionStatus(db *gorm.DB, variables map[string]interface{}) (*
 		db.Model(&domain.Snapshot{}).Where("mission_id = ?", mission.ID).Count(&snapCount)
 		mission.TotalDetections = int(snapCount)
 		log.Printf("[GQL] Mission %s — total detections: %d", mission.MissionCode, mission.TotalDetections)
+
+		// === DVR ENGINE: Stop recording and upload to MinIO ===
+		if mission.VideoPath == "" {
+			videoPath := stopAndUploadDVR(id)
+			mission.VideoPath = videoPath
+			log.Printf("[GQL] Mission %s — video path: %s", mission.MissionCode, videoPath)
+		}
 	}
 
 	db.Save(&mission)
@@ -496,6 +513,33 @@ func mutateStartMission(db *gorm.DB, variables map[string]interface{}) (*domain.
 	mission.Status = "LIVE"
 	mission.StartedAt = &now
 	db.Save(&mission)
+
+	// === DVR ENGINE: Spawn ffmpeg to record in real-time ===
+	// -re forces real-time input speed (simulates live camera)
+	// No -stream_loop: if drone.mp4 ends before mission, that's a "signal lost" scenario
+	outFile := fmt.Sprintf("/tmp/mission_%s.mp4", id)
+	cmd := exec.Command("ffmpeg",
+		"-y",          // overwrite output
+		"-re",         // real-time input speed
+		"-i", "/app/drone.mp4", // source
+		"-c", "copy",  // stream copy (no re-encode, fast)
+		outFile,
+	)
+	cmd.Stdout = nil // suppress ffmpeg output in logs
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		log.Printf("[DVR] WARNING: ffmpeg failed to start for mission %s: %v", id, err)
+		// Non-fatal — mission still starts, just no recording
+	} else {
+		log.Printf("[DVR] Recording started → %s (pid=%d)", outFile, cmd.Process.Pid)
+		activeRecordings.Store(id, cmd)
+		// Reap the process asynchronously to avoid zombies
+		go func() {
+			cmd.Wait()
+			log.Printf("[DVR] ffmpeg process exited for mission %s (source ended or killed)", id)
+		}()
+	}
+
 	db.Preload("Asset").Preload("Pilot").Preload("Snapshots").First(&mission, "id = ?", mission.ID)
 	return &mission, nil
 }
@@ -594,6 +638,111 @@ func mutateDeleteAllMissions(db *gorm.DB) (bool, error) {
 	db.Exec("DELETE FROM mission_archives")
 	log.Println("[GQL] ✅ All missions, snapshots, pre-flight checks, and archives wiped")
 	return true, nil
+}
+
+
+func fallbackVideoURL() string {
+	return "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+}
+
+// stopAndUploadDVR gracefully terminates the ffmpeg DVR process for a mission,
+// uploads the recorded file to MinIO, and returns the public video URL.
+func stopAndUploadDVR(missionID string) string {
+	outFile := fmt.Sprintf("/tmp/mission_%s.mp4", missionID)
+
+	// --- Step 1: Retrieve and stop the ffmpeg process ---
+	if raw, ok := activeRecordings.Load(missionID); ok {
+		cmd := raw.(*exec.Cmd)
+
+		// SIGINT causes ffmpeg to flush and finalize the MP4 (write moov atom).
+		// This is CRITICAL — Kill() would truncate the file and make it unplayable.
+		if cmd.Process != nil {
+			if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+				// Process already exited naturally (e.g., 2-min drone.mp4 ran out during a 5-min flight)
+				log.Printf("[DVR] ffmpeg already exited for mission %s (signal lost scenario): %v", missionID, err)
+			} else {
+				log.Printf("[DVR] Sent SIGINT to ffmpeg (pid=%d) for mission %s", cmd.Process.Pid, missionID)
+
+				// Wait up to 5 seconds for clean exit
+				done := make(chan error, 1)
+				go func() { done <- cmd.Wait() }()
+				select {
+				case <-done:
+					log.Printf("[DVR] ffmpeg exited cleanly for mission %s", missionID)
+				case <-time.After(5 * time.Second):
+					log.Printf("[DVR] ffmpeg timeout — force killing for mission %s", missionID)
+					cmd.Process.Kill()
+				}
+			}
+		}
+		activeRecordings.Delete(missionID)
+	} else {
+		log.Printf("[DVR] No active recording found for mission %s — may have ended naturally", missionID)
+	}
+
+	// --- Step 2: Upload recorded file to MinIO ---
+	// Prefer the real DVR recording; fall back to test.mp4 if drone video ended early
+	uploadFile := outFile
+	if _, err := os.Stat(outFile); os.IsNotExist(err) {
+		log.Printf("[DVR] Recording not found at %s — falling back to test.mp4", outFile)
+		uploadFile = "/app/test.mp4"
+	}
+
+	url := uploadFileToMinIO(missionID, uploadFile)
+
+	// --- Step 3: Clean up temp file ---
+	if uploadFile == outFile {
+		os.Remove(outFile)
+		log.Printf("[DVR] Cleaned up temp file: %s", outFile)
+	}
+
+	return url
+}
+
+// uploadFileToMinIO uploads any local file to the mission-recordings MinIO bucket.
+func uploadFileToMinIO(missionID, filePath string) string {
+	endpoint := os.Getenv("MINIO_ENDPOINT")
+	accessKey := os.Getenv("MINIO_ACCESS_KEY")
+	secretKey := os.Getenv("MINIO_SECRET_KEY")
+	if endpoint == "" {
+		endpoint = "locallitix-minio:9000"
+	}
+
+	client, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: false,
+	})
+	if err != nil {
+		log.Printf("[MinIO] Client error: %v", err)
+		return fallbackVideoURL()
+	}
+
+	bucket := "mission-recordings"
+	ctx := context.Background()
+
+	exists, _ := client.BucketExists(ctx, bucket)
+	if !exists {
+		if err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+			log.Printf("[MinIO] Bucket create error: %v", err)
+			return fallbackVideoURL()
+		}
+		policy := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::mission-recordings/*"]}]}`
+		client.SetBucketPolicy(ctx, bucket, policy)
+	}
+
+	objectName := fmt.Sprintf("mission-%s.mp4", missionID)
+	_, err = client.FPutObject(ctx, bucket, objectName, filePath, minio.PutObjectOptions{
+		ContentType: "video/mp4",
+	})
+	if err != nil {
+		log.Printf("[MinIO] Upload failed: %v", err)
+		return fallbackVideoURL()
+	}
+
+	publicHost := strings.Replace(endpoint, "locallitix-minio", "localhost", 1)
+	url := fmt.Sprintf("http://%s/%s/%s", publicHost, bucket, objectName)
+	log.Printf("[MinIO] Uploaded %s → %s", filePath, url)
+	return url
 }
 
 // ===================================================

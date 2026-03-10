@@ -16,6 +16,7 @@ export const GET_MISSIONS = gql`
       duration
       coverageArea
       totalDetections
+      videoPath
       asset {
         id
         name
@@ -46,7 +47,6 @@ export const GET_MISSIONS = gql`
       endedAt
       createdAt
       teamMemberIds
-      videoPath
     }
   }
 `;
