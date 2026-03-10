@@ -119,11 +119,18 @@ services:
       - COOKIE_DOMAIN=localhost
       - COOKIE_SECURE=false
       - CORS_ORIGIN=http://localhost:3000
+      - DATALASTIC_API_KEY=${DATALASTIC_API_KEY}
+      - ENABLE_DATALASTIC_API=${ENABLE_DATALASTIC_API:-false}
+      - ADSB_API_KEY=${ADSB_API_KEY}
+      - ENABLE_ADSB_API=${ENABLE_ADSB_API:-false}
     ports:
       - "8080:8080"
     volumes:
       - ./mariview-frontend/public/assets/drone.mp4:/app/drone.mp4:ro
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     networks:
       - locallitix-net
 

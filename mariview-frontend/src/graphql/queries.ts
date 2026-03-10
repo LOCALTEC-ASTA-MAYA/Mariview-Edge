@@ -323,11 +323,10 @@ export const GET_LIVE_FLIGHTS = gql`
 
 export const GET_ADSB_AIRCRAFT = gql`
   query GetADSBAircraft {
-    adsbAircraft: getLiveFlights {
+    getLiveFlights {
       id
       icao24
       callsign
-      name: callsign
       aircraftType
       position
       altitude

@@ -31,7 +31,11 @@ export default function Dashboard() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
 
-  const { data: aisData, error: aisError } = useQuery(GET_AIS_VESSELS, { pollInterval: 3000 });
+  // AIS: cache-only = NEVER sends network request from Dashboard.
+  // Data appears here only after user visits the AIS Stream page.
+  const { data: aisData, error: aisError } = useQuery(GET_AIS_VESSELS, {
+    fetchPolicy: 'cache-only',
+  });
   const { data: droneData, error: droneError } = useQuery(GET_LIVE_DRONES, { pollInterval: 3000 });
   const { data: flightData, error: flightError } = useQuery(GET_LIVE_FLIGHTS, { pollInterval: 3000 });
   const { data: weatherData } = useQuery(GET_WEATHER, { pollInterval: 20000 });

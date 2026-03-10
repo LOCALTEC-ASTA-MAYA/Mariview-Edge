@@ -158,7 +158,9 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
   });
 
   // GraphQL fetching for other layers
-  const { data: aisData } = useQuery(GET_AIS_VESSELS, { pollInterval: 5000 });
+  // AIS: cache-only = NEVER sends network request from LiveOps.
+  // Data appears here only after user visits the AIS Stream page.
+  const { data: aisData } = useQuery(GET_AIS_VESSELS, { fetchPolicy: 'cache-only' });
   const { data: adsbData } = useQuery(GET_ADSB_AIRCRAFT, { pollInterval: 5000 });
   const { data: weatherData } = useQuery(GET_WEATHER, { pollInterval: 10000 });
 

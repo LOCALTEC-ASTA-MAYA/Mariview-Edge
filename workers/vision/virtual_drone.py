@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
 """
+Virtual / Real Drone Worker
+============================
+Dual-mode drone pipeline: virtual (local MP4 loop) or real (live RTSP stream).
+
+Switch behaviour via environment variables:
+
+    DRONE_MODE              — 'virtual' (default) or 'real'
+    REAL_DRONE_RTSP_URL     — RTSP URL for the live drone camera feed
+                              (only used when DRONE_MODE=real)
+
+The rest of the pipeline (YOLOv8, CLIP, NATS, FFmpeg → MediaMTX) is identical
+in both modes.
+"""
 Virtual Drone Simulator
 ========================
 A complete C4I virtual drone that:
@@ -271,6 +284,18 @@ VIDEO_PATH = os.getenv("VIDEO_PATH", "/app/videos/raw_drone.mp4")
 YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
 YOLO_CONF = 0.38  # Low threshold to catch gray warships
 PUBLISH_INTERVAL = float(os.getenv("PUBLISH_INTERVAL", "0.5"))
+
+# ── Dual-mode switch ──────────────────────────────────────────────────────────
+# DRONE_MODE: 'virtual' reads VIDEO_PATH (local MP4, loops forever)
+#             'real'    reads REAL_DRONE_RTSP_URL (live RTSP, reconnects on drop)
+DRONE_MODE = os.getenv("DRONE_MODE", "virtual").strip().lower()
+REAL_DRONE_RTSP_URL = os.getenv("REAL_DRONE_RTSP_URL", "")
+RTSP_RECONNECT_DELAY = 5   # seconds between reconnect attempts
+RTSP_MAX_RECONNECTS  = 10  # max consecutive reconnect attempts before abort
+
+if DRONE_MODE == "real" and not REAL_DRONE_RTSP_URL:
+    print("[VDRONE] FATAL: DRONE_MODE=real but REAL_DRONE_RTSP_URL is not set")
+    sys.exit(1)
 
 # Drone identity
 DRONE_FLIGHT_ID = "FLT-001"
@@ -696,9 +721,10 @@ async def main():
     from nats.errors import ConnectionClosedError, NoServersError
 
     print("=" * 60)
-    print("  LOCALLITIX Virtual Drone Simulator — Stateful Engine")
+    print("  LOCALLITIX Drone Worker — Stateful Engine")
     print("=" * 60)
-    print(f"  Video:     {VIDEO_PATH}")
+    _mode_label = f"REAL DRONE  ({REAL_DRONE_RTSP_URL})" if DRONE_MODE == "real" else f"VIRTUAL     ({VIDEO_PATH})"
+    print(f"  Mode:      {_mode_label}")
     print(f"  Model:     {YOLO_MODEL} (conf={YOLO_CONF})")
     print(f"  NATS:      {NATS_URL}")
     print(f"  RTSP Push: {MEDIAMTX_RTSP_URL}")
@@ -761,22 +787,48 @@ async def main():
     clip_model.eval()
     print(f"[VDRONE] CLIP loaded on {device.upper()}. Candidates: {CLIP_CANDIDATES}")
 
-    # ── Verify video file exists ──
-    if not os.path.exists(VIDEO_PATH):
-        print(f"[VDRONE] FATAL: Video file not found: {VIDEO_PATH}")
-        sys.exit(1)
+    # ── Probe video source for dimensions (needed to configure FFmpeg) ────────
+    if DRONE_MODE == "real":
+        print(f"[VDRONE] REAL mode — probing RTSP stream: {REAL_DRONE_RTSP_URL}")
+        _probe_source = REAL_DRONE_RTSP_URL
+    else:
+        if not os.path.exists(VIDEO_PATH):
+            print(f"[VDRONE] FATAL: Video file not found: {VIDEO_PATH}")
+            sys.exit(1)
+        _probe_source = VIDEO_PATH
 
-    # Probe video dimensions once (needed for FFmpeg)
-    probe_cap = cv2.VideoCapture(VIDEO_PATH)
+    probe_cap = cv2.VideoCapture(_probe_source)
     if not probe_cap.isOpened():
-        print(f"[VDRONE] FATAL: Cannot open video: {VIDEO_PATH}")
+        print(f"[VDRONE] FATAL: Cannot open video source: {_probe_source}")
         sys.exit(1)
-    width = int(probe_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    width  = int(probe_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(probe_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = probe_cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(probe_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps    = probe_cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(probe_cap.get(cv2.CAP_PROP_FRAME_COUNT))  # 0 for live streams
     probe_cap.release()
-    print(f"[VDRONE] Video: {width}x{height} @ {fps:.1f} FPS ({total_frames} frames)")
+    print(f"[VDRONE] Source: {width}x{height} @ {fps:.1f} FPS"
+          f"{f' ({total_frames} frames)' if total_frames > 0 else ' (live stream)'}")
+
+    # ── Helper: open video source with reconnect for real RTSP ───────────────
+    def open_video_source(attempt: int = 0) -> cv2.VideoCapture:
+        """Open the correct video source based on DRONE_MODE.
+        For real RTSP: retries up to RTSP_MAX_RECONNECTS times with a delay."""
+        if DRONE_MODE == "real":
+            for i in range(1, RTSP_MAX_RECONNECTS + 1):
+                print(f"[VDRONE] REAL — opening RTSP (attempt {i}/{RTSP_MAX_RECONNECTS}): {REAL_DRONE_RTSP_URL}")
+                cap = cv2.VideoCapture(REAL_DRONE_RTSP_URL)
+                if cap.isOpened():
+                    print(f"[VDRONE] RTSP stream opened successfully")
+                    return cap
+                print(f"[VDRONE] CRITICAL: RTSP unreachable — retrying in {RTSP_RECONNECT_DELAY}s...")
+                time.sleep(RTSP_RECONNECT_DELAY)
+            print(f"[VDRONE] FATAL: Could not connect to RTSP after {RTSP_MAX_RECONNECTS} attempts")
+            raise RuntimeError("RTSP stream unreachable")
+        else:
+            cap = cv2.VideoCapture(VIDEO_PATH)
+            if not cap.isOpened():
+                raise RuntimeError(f"Cannot open video file: {VIDEO_PATH}")
+            return cap
 
     frame_interval = 1.0 / fps
     ais_service = DatalasticService()
@@ -869,14 +921,16 @@ async def main():
                            clip_model, clip_processor, device)
             )
 
-            # Open video from frame 0
-            cap = cv2.VideoCapture(VIDEO_PATH)
-            if not cap.isOpened():
-                print(f"[VDRONE] ERROR: Cannot open video: {VIDEO_PATH}")
+            # Open video / RTSP source for this mission
+            try:
+                cap = open_video_source()
+            except RuntimeError as e:
+                print(f"[VDRONE] ERROR: {e}")
                 engine_active = False
                 continue  # back to IDLE
 
-            print(f"[VDRONE] ▶ ACTIVE — processing {total_frames} frames at {fps:.1f} fps...")
+            is_live = (DRONE_MODE == "real")
+            print(f"[VDRONE] ▶ ACTIVE — {'live RTSP stream' if is_live else f'{total_frames} frames at {fps:.1f} fps'}...")
 
             # ── ACTIVE PROCESSING LOOP ──
             try:
@@ -886,17 +940,29 @@ async def main():
                     # Read frame — on EOF, send final telemetry and return to IDLE
                     ret, frame = cap.read()
                     if not ret:
-                        print("[VDRONE] Video ended — broadcasting final landing telemetry...")
-                        final_telem = telemetry.tick(0, video_time=TelemetryState.VIDEO_DURATION)
-                        final_telem["alt"] = 0.0
-                        final_telem["spd"] = 0.0
-                        try:
-                            data = json.dumps(final_telem).encode()
-                            await js.publish("TELEMETRY.drone.live", data)
-                            print("[VDRONE] ✓ Final telemetry sent (alt=0.0, spd=0.0)")
-                        except Exception as e:
-                            print(f"[VDRONE] NATS final telemetry error: {e}")
-                        break  # → back to IDLE
+                        if is_live:
+                            # Real RTSP drop — attempt reconnect
+                            print("[VDRONE] CRITICAL: RTSP frame read failed — attempting reconnect...")
+                            cap.release()
+                            try:
+                                cap = open_video_source()
+                                continue  # resume the active loop with new cap
+                            except RuntimeError:
+                                print("[VDRONE] FATAL: Could not reconnect to RTSP — ending mission")
+                                break  # → back to IDLE
+                        else:
+                            # Virtual MP4 EOF — broadcast final telemetry then loop back to IDLE
+                            print("[VDRONE] Video ended — broadcasting final landing telemetry...")
+                            final_telem = telemetry.tick(0, video_time=TelemetryState.VIDEO_DURATION)
+                            final_telem["alt"] = 0.0
+                            final_telem["spd"] = 0.0
+                            try:
+                                data = json.dumps(final_telem).encode()
+                                await js.publish("TELEMETRY.drone.live", data)
+                                print("[VDRONE] ✓ Final telemetry sent (alt=0.0, spd=0.0)")
+                            except Exception as e:
+                                print(f"[VDRONE] NATS final telemetry error: {e}")
+                            break  # → back to IDLE
 
                     frame_id += 1
                     video_time = frame_id / fps
