@@ -661,7 +661,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
           <h1 className="text-3xl font-extrabold tracking-tight text-white mb-2">
             Mission Intelligence & <span className="text-[#21A68D]">History</span>
           </h1>
-          <p className="text-muted-foreground/80 font-medium text-white">
+          <p className="text-muted-foreground text-sm md:text-base">
             Operational archive and spatial intelligence analytics
           </p>
         </div>
