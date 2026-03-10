@@ -9,3 +9,5 @@ torch
 torchvision
 transformers
 Pillow
+pymavlink==2.4.41
+nats-py==2.6.0

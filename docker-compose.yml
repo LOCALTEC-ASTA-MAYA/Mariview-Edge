@@ -171,6 +171,30 @@ services:
     networks:
       - locallitix-net
 
+  # ============================================
+  # MAVLink → NATS TELEMETRY BRIDGE (real drone only)
+  # Start: docker compose --profile real up -d locallitix-telemetry-bridge
+  # ============================================
+
+  locallitix-telemetry-bridge:
+    build:
+      context: ./workers/vision
+      dockerfile: Dockerfile
+    command: ["python", "real_telemetry_bridge.py"]
+    depends_on:
+      - locallitix-backbone
+    env_file:
+      - .env
+    environment:
+      - NATS_URL=nats://locallitix-backbone:4222
+    ports:
+      - "14550:14550/udp"   # MAVLink UDP — GCS / Herelink directs here
+    restart: unless-stopped
+    profiles:
+      - real                 # skipped in normal `docker compose up`; enable with --profile real
+    networks:
+      - locallitix-net
+
 networks:
   locallitix-net:
     driver: bridge

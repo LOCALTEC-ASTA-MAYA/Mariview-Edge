@@ -1114,8 +1114,10 @@ async def main():
 
                         last_nats_publish = now
 
-                    # ── Publish telemetry ──
-                    if now - last_telemetry_publish >= 1.0:
+                    # ── Publish telemetry (VIRTUAL ONLY) ──
+                    # In real mode, real_telemetry_bridge.py sends live MAVLink telemetry.
+                    # We skip the fake positions here to avoid overwriting the real data.
+                    if not is_live and now - last_telemetry_publish >= 1.0:
                         telem = telemetry.tick(1.0, video_time=video_time)
                         try:
                             data = json.dumps(telem).encode()
@@ -1154,8 +1156,8 @@ async def main():
                     pass
                 print(f"[VDRONE] Mission ended: {frame_id} frames, {len(TRACKING_CACHE)} tracked objects")
 
-                # If stopped via COMMAND.drone.stop, send final zero-altitude telemetry
-                if stop_event.is_set():
+                # If stopped via COMMAND.drone.stop, send final zero-altitude telemetry (virtual only)
+                if stop_event.is_set() and not is_live:
                     final_telem = telemetry.tick(0, video_time=TelemetryState.VIDEO_DURATION)
                     final_telem["alt"] = 0.0
                     final_telem["spd"] = 0.0
