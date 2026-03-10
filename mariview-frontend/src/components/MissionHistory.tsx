@@ -934,43 +934,53 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
               </div>
             ) : (
               <>
-                <div className="h-[230px] w-full mt-1 flex items-center justify-center relative">
-                  <ResponsiveContainer width="100%" height="100%">
+                {/* Donut chart with absolute-positioned center overlay */}
+                <div className="relative w-full mt-1">
+                  <ResponsiveContainer width="100%" height={250}>
                     <PieChart>
                       <Pie
                         data={deviceOperationData.pieData}
                         cx="50%" cy="50%"
-                        innerRadius={65} outerRadius={90}
-                        paddingAngle={5} dataKey="value"
-                        stroke="rgba(255,255,255,0.05)" strokeWidth={2}
+                        innerRadius={70} outerRadius={90}
+                        paddingAngle={10} dataKey="value" nameKey="label"
+                        stroke="none"
+                        startAngle={90} endAngle={-270}
                       >
-                        {deviceOperationData.pieData.map((entry: any, index: number) => (
-                          <Cell key={`dev-${index}`} fill={entry.color} fillOpacity={0.9} />
-                        ))}
+                        {deviceOperationData.pieData.map((_: any, index: number) => {
+                          const COLORS = ['#3B82F6', '#A855F7', '#F97316', '#22C55E'];
+                          return <Cell key={`dev-${index}`} fill={COLORS[index % COLORS.length]} />;
+                        })}
                       </Pie>
                       <Tooltip
                         contentStyle={{ backgroundColor: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', fontSize: '11px' }}
                         itemStyle={{ color: '#fff', fontWeight: 'bold' }}
+                        formatter={(v: any, _: any, p: any) => [`${v} min`, p.payload.label]}
                       />
-                      <text x="50%" y="48%" textAnchor="middle" dominantBaseline="middle" className="fill-white text-[10px] font-bold opacity-40 uppercase tracking-widest">
-                        Devices
-                      </text>
-                      <text x="50%" y="55%" textAnchor="middle" dominantBaseline="middle" className="fill-[#21A68D] text-lg font-black">
-                        {deviceOperationData.totalDevices}
-                      </text>
                     </PieChart>
                   </ResponsiveContainer>
+                  {/* Center text overlay — HTML positioned over SVG */}
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                    <span className="text-3xl font-black text-white leading-none">{deviceOperationData.totalDevices}</span>
+                    <span className="text-[10px] font-bold uppercase tracking-[0.2em] mt-0.5" style={{ color: '#9CA3AF' }}>Devices</span>
+                  </div>
                 </div>
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  {deviceOperationData.pieData.map((device: any) => (
-                    <div key={device.id} className="p-2.5 bg-white/[0.03] rounded-xl border border-white/[0.05] flex items-center gap-3">
-                      <div className="w-3 h-8 rounded" style={{ backgroundColor: device.color }}></div>
-                      <div>
-                        <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">{device.label}</p>
-                        <p className="text-sm font-black text-white">{device.value} <span className="text-[10px] text-muted-foreground font-bold">min</span></p>
+
+                {/* Custom legend grid */}
+                <div className="grid grid-cols-2 gap-3 mt-6">
+                  {deviceOperationData.pieData.map((device: any, index: number) => {
+                    const COLORS = ['#3B82F6', '#A855F7', '#F97316', '#22C55E'];
+                    const color = COLORS[index % COLORS.length];
+                    return (
+                      <div key={device.id} className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]">
+                        {/* Colored pill */}
+                        <div className="w-1.5 h-10 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+                        <div>
+                          <p className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: '#9CA3AF' }}>{device.label}</p>
+                          <p className="text-xl font-black text-white leading-tight">{device.value} <span className="text-xs font-bold" style={{ color: '#9CA3AF' }}>min</span></p>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </>
             )}

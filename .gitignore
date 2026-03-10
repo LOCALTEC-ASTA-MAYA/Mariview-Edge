@@ -65,3 +65,5 @@ core-backend/*.rtsp
 
 core-backend/.DS_Store
 core-backend/Thumbs.db
+
+*.env
