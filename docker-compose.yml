@@ -127,6 +127,7 @@ services:
       - "8080:8080"
     volumes:
       - ./mariview-frontend/public/assets/drone.mp4:/app/drone.mp4:ro
+      - recordings-data:/recordings   # read AI-annotated MP4s for MinIO upload
     restart: unless-stopped
     dns:
       - 8.8.8.8
@@ -161,6 +162,7 @@ services:
       - .env
     volumes:
       - ./mariview-frontend/public/assets/drone.mp4:/app/videos/drone.mp4:ro
+      - recordings-data:/recordings   # write AI-annotated MP4s here
     environment:
       - NATS_URL=nats://locallitix-backbone:4222
       - MEDIAMTX_RTSP_URL=rtsp://locallitix-video:8554/drone-cam
@@ -204,3 +206,4 @@ volumes:
   pg-data:
   influx-data:
   minio-data:
+  recordings-data:  # Shared between ai-vision (writer) and core-api (reader/uploader)

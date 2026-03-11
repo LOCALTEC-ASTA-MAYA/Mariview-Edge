@@ -2,37 +2,33 @@
 """
 Virtual / Real Drone Worker
 ============================
-Dual-mode drone pipeline: virtual (local MP4 loop) or real (live RTSP stream).
+Dual-mode pipeline: virtual (local MP4 loop) or real (live RTSP stream).
 
-Switch behaviour via environment variables:
+Modes (set via DRONE_MODE env var):
+  virtual  -- reads VIDEO_PATH MP4 in a loop, simulates telemetry
+  real     -- reads REAL_DRONE_RTSP_URL live RTSP, mutes fake telemetry
 
-    DRONE_MODE              — 'virtual' (default) or 'real'
-    REAL_DRONE_RTSP_URL     — RTSP URL for the live drone camera feed
-                              (only used when DRONE_MODE=real)
-
-The rest of the pipeline (YOLOv8, CLIP, NATS, FFmpeg → MediaMTX) is identical
-in both modes.
-"""
-Virtual Drone Simulator
-========================
-A complete C4I virtual drone that:
-
-1. Reads a local MP4 video file frame-by-frame (OpenCV)
-2. Runs YOLOv8 inference on each frame
-3. Draws annotated bounding boxes on the frame
-4. Pipes the annotated video to FFmpeg → RTSP push → MediaMTX
-5. Publishes detection JSON to NATS  VISION.ai.raw
-6. Publishes simulated telemetry to NATS  TELEMETRY.drone.live
-7. Loops the video indefinitely
+Core pipeline (identical in both modes):
+  1. cv2.VideoCapture  -- reads frames from source
+  2. YOLOv8 tracking  -- detect + track all objects (all 80 COCO classes)
+  3. CLIP zero-shot   -- rich description for each new track_id (cached)
+  4. HUD overlay      -- military reticles + YOLO | CLIP label text
+  5. FFmpeg stdin     -- H.264 RTSP push to MediaMTX (live frontend feed)
+  6. cv2.VideoWriter  -- AI-annotated MP4 saved to /recordings/ (mission archive)
+  7. NATS publish     -- VISION.ai.raw detections + TELEMETRY.drone.live
 
 Environment Variables:
-    NATS_URL            — NATS server URL (default: nats://locallitix-backbone:4222)
-    MEDIAMTX_RTSP_URL   — RTSP push target (default: rtsp://locallitix-video:8554/drone-cam)
-    VIDEO_PATH          — Path to the input MP4 (default: /app/videos/raw_drone.mp4)
-    YOLO_MODEL          — YOLOv8 model name (default: yolov8n.pt for speed)
-    YOLO_CONF           — Minimum confidence threshold (default: 0.35)
-    PUBLISH_INTERVAL    — Seconds between NATS detection publishes (default: 0.5)
+    NATS_URL            -- NATS server URL (default: nats://locallitix-backbone:4222)
+    MEDIAMTX_RTSP_URL   -- RTSP push target (default: rtsp://locallitix-video:8554/drone-cam)
+    VIDEO_PATH          -- Local MP4 path (virtual mode, default: /app/videos/raw_drone.mp4)
+    REAL_DRONE_RTSP_URL -- Live RTSP URL (real mode)
+    DRONE_MODE          -- 'virtual' or 'real' (default: virtual)
+    RECORDING_DIR       -- Directory for MP4 archives (default: /recordings)
+    YOLO_MODEL          -- YOLOv8 model (default: yolov8n.pt)
+    YOLO_CONF           -- Confidence threshold (default: 0.38)
+    PUBLISH_INTERVAL    -- NATS detection publish interval seconds (default: 0.5)
 """
+
 
 import asyncio
 import base64
@@ -57,8 +53,46 @@ except ImportError:
     aiohttp = None  # type: ignore
     print("[VDRONE] WARNING: aiohttp not installed — Datalastic AIS enrichment disabled")
 
-# CLIP candidate classes for zero-shot maritime classification
-CLIP_CANDIDATES = ["Yacht", "Sailboat", "Cargo Vessel", "Patrol Boat", "Speedboat", "Warship", "Floating Debris", "Pier or Dock", "Ocean Wave"]
+# ── CLIP candidate labels: rich, multi-domain (land + sea + air) ─────────────
+# CLIP is run ONCE per track_id (new object) then cached — no per-frame overhead.
+CLIP_CANDIDATES = [
+    # ── Maritime / Sea ────────────────────────────────────────────────────────
+    "a military patrol boat",
+    "a civilian speedboat",
+    "a cargo ship",
+    "a container ship",
+    "a tanker vessel",
+    "a fishing boat",
+    "a yacht or sailboat",
+    "a warship",
+    "a rubber inflatable boat",
+    # ── Land vehicles ─────────────────────────────────────────────────────────
+    "a white SUV",
+    "a black sedan car",
+    "a red pickup truck",
+    "a military truck",
+    "a bus or minibus",
+    "a motorcycle",
+    "an armored vehicle",
+    "a construction vehicle",
+    # ── People ────────────────────────────────────────────────────────────────
+    "a person walking",
+    "a person standing still",
+    "a group of people",
+    "a person on deck of a ship",
+    # ── Aircraft ──────────────────────────────────────────────────────────────
+    "a fixed-wing aircraft",
+    "a helicopter",
+    "a small drone",
+    # ── Infrastructure / Background ───────────────────────────────────────────
+    "a pier or dock structure",
+    "ocean waves",
+    "floating debris in water",
+    "a building or structure",
+    "a road or runway",
+    "trees or vegetation",
+    "an empty field",
+]
 
 # ─────────────────────────────────────────────
 # Datalastic AIS Service
@@ -314,20 +348,43 @@ PATROL_WAYPOINTS = [
     (-10.1700, 123.5500),
 ]
 
-# YOLOv8 COCO class name → our maritime class name mapping
+# YOLOv8 COCO class name → internal category tag
+# All 80 COCO classes are covered. CLIP provides the detailed description.
+# This is a lightweight tag for coloring / AIS-enrichment decisions.
 COCO_TO_MARITIME = {
-    "boat": "cargo_vessel",
-    "ship": "cargo_vessel",
-    "airplane": "patrol_boat",
-    "person": "person_on_deck",
-    "surfboard": "floating_debris",
-    "sports ball": "floating_debris",
-    "kite": "floating_debris",
-    "car": "speedboat",
-    "truck": "cargo_vessel",
-    "bus": "cargo_vessel",
-    "bird": "floating_debris",
-    "umbrella": "floating_debris",
+    # ── Vehicles ──────────────────────────────────────────────────────────────
+    "car":           "car",
+    "truck":         "truck",
+    "bus":           "bus",
+    "motorcycle":    "motorcycle",
+    "bicycle":       "bicycle",
+    "train":         "train",
+    # ── Maritime ──────────────────────────────────────────────────────────────
+    "boat":          "vessel",
+    "ship":          "vessel",
+    # ── Aircraft ──────────────────────────────────────────────────────────────
+    "airplane":      "aircraft",
+    "helicopter":    "aircraft",
+    # ── People ────────────────────────────────────────────────────────────────
+    "person":        "person",
+    # ── Animals (flag as wildlife for operators) ──────────────────────────────
+    "bird":          "wildlife",
+    "dog":           "wildlife",
+    "cat":           "wildlife",
+    "horse":         "wildlife",
+    "cow":           "wildlife",
+    "sheep":         "wildlife",
+    # ── Debris / Environmental ─────────────────────────────────────────────── 
+    "surfboard":     "floating_debris",
+    "sports ball":   "floating_debris",
+    "kite":          "floating_debris",
+    "umbrella":      "floating_debris",
+    "bottle":        "floating_debris",
+    # ── Infrastructure ────────────────────────────────────────────────────────
+    "bench":         "structure",
+    "traffic light": "structure",
+    "stop sign":     "structure",
+    "fire hydrant":  "structure",
 }
 
 # ─────────────────────────────────────────────
@@ -565,13 +622,30 @@ async def api_worker(ais_service: "DatalasticService", telemetry: "TelemetryStat
 # Military HUD renderer (draws from active visuals list)
 # ─────────────────────────────────────────────
 
-# Per-class color map (BGR)
+# Per-category HUD color map (BGR) — covers all COCO_TO_MARITIME output tags
 _HUD_COLORS: dict[str, tuple[int, int, int]] = {
-    "cargo_vessel":    (0, 230, 118),   # green
-    "speedboat":       (230, 216, 0),   # cyan-ish
-    "patrol_boat":     (0, 180, 255),   # amber
-    "person_on_deck":  (80, 127, 255),  # coral
-    "floating_debris": (180, 180, 180), # silver
+    # Vessels (green spectrum)
+    "vessel":          (0, 230, 118),   # bright green
+    "cargo_vessel":    (0, 200, 80),    # legacy compat
+    "speedboat":       (0, 255, 180),
+    "patrol_boat":     (0, 200, 255),
+    # Land vehicles (amber/orange)
+    "car":             (0, 165, 255),   # orange
+    "truck":           (0, 140, 255),   # deeper orange
+    "bus":             (0, 120, 230),
+    "motorcycle":      (20, 200, 255),  # gold
+    "bicycle":         (40, 220, 255),
+    "train":           (80, 80, 200),   # slate blue
+    # People (coral/red)
+    "person":          (80, 80, 255),   # coral
+    "person_on_deck":  (60, 60, 230),
+    # Aircraft (cyan)
+    "aircraft":        (255, 230, 0),   # cyan
+    # Wildlife (purple)
+    "wildlife":        (200, 80, 200),
+    # Debris / structure (grey)
+    "floating_debris": (180, 180, 180),
+    "structure":       (120, 120, 140),
 }
 _HUD_DEFAULT_COLOR = (200, 200, 200)
 
@@ -617,17 +691,21 @@ def draw_hud_from_cache(frame: np.ndarray, active_visuals: list[dict]) -> np.nda
         cv2.addWeighted(overlay, 0.20, annotated, 0.80, 0, annotated)
         overlay = annotated.copy()
 
-        # ── Label: [ID: N] CLASS | MMSI ──
+        # ── HUD Label: [ID:N] YOLO_CLASS | CLIP Description  conf% ────────────
         if status == "ANALYZED":
-            ais = cache_entry.get("aisData", {})
-            label = f"[ID:{track_id}] {cache_entry.get('class_name', maritime_cls).upper()} {conf:.0%}"
-            mmsi_line = f"MMSI: {ais.get('mmsi', 'N/A')} | {ais.get('vesselName', '')}"
+            clip_desc  = cache_entry.get("class_name", maritime_cls)  # CLIP result
+            yolo_cls   = vis.get("yolo_cls",  maritime_cls).upper()   # raw YOLO class
+            label      = f"[ID:{track_id}] {yolo_cls} | {clip_desc}  {conf:.0%}"
+            ais        = cache_entry.get("aisData")
+            # Only show MMSI line if enriched with AIS data (vessel detections)
+            mmsi_line  = f"MMSI: {ais['mmsi']} | {ais.get('vesselName','')}" if ais else ""
         elif status == "PENDING":
-            label = f"[ID:{track_id}] DETECTING... {conf:.0%}"
-            mmsi_line = "MMSI: FETCHING..."
+            yolo_cls   = vis.get("yolo_cls", maritime_cls).upper()
+            label      = f"[ID:{track_id}] {yolo_cls} | ANALYZING...  {conf:.0%}"
+            mmsi_line  = ""
         else:
-            label = f"[ID:{track_id}] {maritime_cls.upper()} {conf:.0%}"
-            mmsi_line = ""
+            label      = f"[ID:{track_id}] {maritime_cls.upper()}  {conf:.0%}"
+            mmsi_line  = ""
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale, font_thick = 0.45, 1
@@ -932,6 +1010,19 @@ async def main():
             is_live = (DRONE_MODE == "real")
             print(f"[VDRONE] ▶ ACTIVE — {'live RTSP stream' if is_live else f'{total_frames} frames at {fps:.1f} fps'}...")
 
+            # ── Mission Recorder: VideoWriter (writes AI-annotated frames to MP4) ──────
+            _rec_dir = os.getenv("RECORDING_DIR", "/recordings")
+            os.makedirs(_rec_dir, exist_ok=True)
+            _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            recording_path = os.path.join(_rec_dir, f"annotated_{_ts}.mp4")
+            _fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(recording_path, _fourcc, fps, (width, height))
+            if writer.isOpened():
+                print(f"[VDRONE] ● REC — recording to: {recording_path}")
+            else:
+                print(f"[VDRONE] WARNING: VideoWriter failed to open — recording disabled")
+                writer = None
+
             # ── ACTIVE PROCESSING LOOP ──
             try:
                 while not process_shutdown.is_set() and not stop_event.is_set():
@@ -1042,10 +1133,11 @@ async def main():
 
                                 # Build active visuals for THIS frame only
                                 active_visuals.append({
-                                    "id": tid,
-                                    "bbox": [x1, y1, x2, y2],
-                                    "conf": conf,
+                                    "id":          tid,
+                                    "bbox":        [x1, y1, x2, y2],
+                                    "conf":        conf,
                                     "maritime_cls": maritime_cls,
+                                    "yolo_cls":    cls_name,  # raw YOLO class for HUD label
                                 })
 
                     # ── Garbage collect stale objects (not seen for 15+ frames) ──
@@ -1088,12 +1180,17 @@ async def main():
                                     # JIKA DERMAGA/OMBAK: Blacklist ID-nya agar selamanya tidak difoto!
                                     _snapshot_taken.add(tid)
 
-                    # ── Pipe to FFmpeg (RTSP) ──
+                    # ── Pipe to FFmpeg (RTSP output to MediaMTX) ──
                     try:
                         ffmpeg_proc.stdin.write(annotated.tobytes())
                     except BrokenPipeError:
                         print("[VDRONE] FFmpeg pipe broken, restarting...")
                         ffmpeg_proc = start_ffmpeg(width, height, fps)
+
+                    # ── Mission Recorder: write annotated frame to MP4 archive ──
+                    # Done AFTER ffmpeg push so it never blocks the live stream.
+                    if writer is not None and writer.isOpened():
+                        writer.write(annotated)
 
                     # ── Publish detections to NATS (from TRACKING_CACHE) ──
                     now = time.monotonic()
@@ -1176,6 +1273,21 @@ async def main():
                     ffmpeg_proc.wait(timeout=5)
                 except Exception:
                     ffmpeg_proc.kill()
+
+                # ── Finalize MP4 recording (CRITICAL — must call before exit) ──
+                if writer is not None:
+                    writer.release()
+                    print(f"[VDRONE] ● REC FINALIZED — {recording_path}")
+                    # Notify Go backend: recording is ready for MinIO upload
+                    try:
+                        await js.publish("MISSION.recording.ready", json.dumps({
+                            "path": recording_path,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "drone_mode": DRONE_MODE,
+                        }).encode())
+                        print("[VDRONE] ✓ MISSION.recording.ready published")
+                    except Exception as e:
+                        print(f"[VDRONE] WARNING: Could not publish recording.ready: {e}")
 
                 print("[VDRONE] Resources released — returning to IDLE")
 

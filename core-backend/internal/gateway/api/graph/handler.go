@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -681,11 +682,19 @@ func stopAndUploadDVR(missionID string) string {
 	}
 
 	// --- Step 2: Upload recorded file to MinIO ---
-	// Prefer the real DVR recording; fall back to test.mp4 if drone video ended early
+	// Priority: (1) FFmpeg DVR temp file, (2) Python AI-annotated MP4 from /recordings volume,
+	// (3) test.mp4 fallback
 	uploadFile := outFile
 	if _, err := os.Stat(outFile); os.IsNotExist(err) {
-		log.Printf("[DVR] Recording not found at %s — falling back to test.mp4", outFile)
-		uploadFile = "/app/test.mp4"
+		// FFmpeg DVR file not found — try Python VideoWriter recording
+		log.Printf("[DVR] FFmpeg recording not found at %s — checking /recordings/ for AI-annotated MP4", outFile)
+		uploadFile = findLatestRecording("/recordings")
+		if uploadFile == "" {
+			log.Printf("[DVR] No AI recording found in /recordings — falling back to test.mp4")
+			uploadFile = "/app/test.mp4"
+		} else {
+			log.Printf("[DVR] Using AI-annotated recording: %s", uploadFile)
+		}
 	}
 
 	url := uploadFileToMinIO(missionID, uploadFile)
@@ -697,6 +706,30 @@ func stopAndUploadDVR(missionID string) string {
 	}
 
 	return url
+}
+
+// findLatestRecording returns the most recently modified .mp4 file in dir, or "".
+func findLatestRecording(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var latest string
+	var latestMod int64
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".mp4" {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Unix() > latestMod {
+			latestMod = info.ModTime().Unix()
+			latest = filepath.Join(dir, e.Name())
+		}
+	}
+	return latest
 }
 
 // uploadFileToMinIO uploads any local file to the mission-recordings MinIO bucket.
