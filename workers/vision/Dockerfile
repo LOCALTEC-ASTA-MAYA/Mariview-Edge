@@ -22,6 +22,7 @@ RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 # Copy application code
 COPY mock_yolo.py .
 COPY virtual_drone.py .
+COPY real_telemetry_bridge.py .
 
 # Default: run the virtual drone simulator
 # Override with CMD to run mock_yolo.py instead

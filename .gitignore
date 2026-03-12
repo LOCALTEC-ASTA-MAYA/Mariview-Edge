@@ -53,6 +53,13 @@ core-backend/venv/
 core-backend/env/
 core-backend/.env
 
+workers/vision/__pycache__/
+workers/vision/*.pyc
+workers/vision/*.pyo
+workers/vision/venv/
+workers/vision/env/
+workers/vision/.env
+
 core-backend/*.pt
 core-backend/*.onnx
 core-backend/*.weights

@@ -577,28 +577,37 @@ async def api_worker(ais_service: "DatalasticService", telemetry: "TelemetryStat
             else:
                 est_gps = {"lat": drone_lat, "lon": drone_lon}
 
-            # Fetch AIS (works if API key exists; falls back to KKP demo AIS otherwise)
-            nearby = await ais_service.fetch_nearby_vessels(est_gps["lat"], est_gps["lon"])
-            if nearby:
-                best = min(nearby, key=lambda v: (
-                    (v["lat"] - est_gps["lat"]) ** 2 + (v["lon"] - est_gps["lon"]) ** 2
-                ))
-                ais_data = {
-                    "mmsi": best["mmsi"],
-                    "vesselName": best["vesselName"],
-                    "imo": best["imo"],
-                    "type": best["type"],
-                    "speed": best["speed"],
-                    "course": best["course"],
-                    "length": best["length"],
-                    "width": best.get("width", 0),
-                    "draft": best["draft"],
-                    "destination": best["destination"],
-                    "eta": best["eta"],
-                    "callSign": best["callSign"],
-                }
+            # Fetch AIS only for vessel-class detections (avoids KM TANJUNG DATU on cars/people)
+            is_vessel = any(v in (classified_name or "").lower() for v in (
+                "boat", "ship", "vessel", "patrol", "cargo", "yacht", "speedboat", "rubber", "warship"
+            ))
+
+            if is_vessel:
+                nearby = await ais_service.fetch_nearby_vessels(est_gps["lat"], est_gps["lon"])
+                if nearby:
+                    best = min(nearby, key=lambda v: (
+                        (v["lat"] - est_gps["lat"]) ** 2 + (v["lon"] - est_gps["lon"]) ** 2
+                    ))
+                    ais_data = {
+                        "mmsi": best["mmsi"],
+                        "vesselName": best["vesselName"],
+                        "imo": best["imo"],
+                        "type": best["type"],
+                        "speed": best["speed"],
+                        "course": best["course"],
+                        "length": best["length"],
+                        "width": best.get("width", 0),
+                        "draft": best["draft"],
+                        "destination": best["destination"],
+                        "eta": best["eta"],
+                        "callSign": best["callSign"],
+                    }
+                else:
+                    # Only use KKP fallback for vessels — NOT for cars, people, etc.
+                    ais_data = dict(KKP_FALLBACK_AIS)
             else:
-                ais_data = dict(KKP_FALLBACK_AIS)
+                # Non-vessel object (car, person, truck…) — no AIS data
+                ais_data = None
 
             # ── Update cache in-place ──
             if track_id in TRACKING_CACHE:
@@ -775,6 +784,14 @@ def tracking_cache_to_payload(frame_id: int, frame_w: int, frame_h: int) -> dict
             det["snapshot_b64"] = entry["snapshot_b64"]
             entry["snapshot_b64"] = None
 
+        # ── SENSOR FUSION: attach fused GPS at snapshot capture time ──
+        # snapshot_telemetry is stamped by the sensor fusion loop exactly when
+        # the YOLO+CLIP snapshot was taken — perfect position/image sync.
+        if entry.get("snapshot_telemetry"):
+            det["snapshot_telemetry"] = entry["snapshot_telemetry"]
+            det["snapshot_timestamp"] = entry.get("snapshot_timestamp")
+
+
         detections.append(det)
 
     return {
@@ -844,7 +861,33 @@ async def main():
 
     js = nc.jetstream()
 
-    # ── Load YOLOv8 with dynamic device selection ──
+    # ── SENSOR FUSION: Subscribe to live telemetry ──────────────────────────────
+    # Keeps latest_telemetry_state updated from TELEMETRY.drone.live so every
+    # snapshot can be stamped with the EXACT GPS position at capture time.
+    # In virtual mode this comes from our own publish; in real mode it comes
+    # from real_telemetry_bridge.py. Either way, the vision worker is agnostic.
+    latest_telemetry_state: dict | None = None
+
+    async def _on_telemetry(msg):
+        nonlocal latest_telemetry_state
+        try:
+            latest_telemetry_state = json.loads(msg.data.decode())
+        except Exception:
+            pass
+        await msg.ack()
+
+    try:
+        _telem_sub = await js.subscribe(
+            "TELEMETRY.drone.live",
+            cb=_on_telemetry,
+            durable="VISION_FUSION",
+            manual_ack=True,
+        )
+        print("[VDRONE] 📡 Sensor Fusion subscriber active (TELEMETRY.drone.live)")
+    except Exception as e:
+        _telem_sub = None
+        print(f"[VDRONE] WARNING: Sensor Fusion subscriber failed: {e}")
+
     await broadcast_status(nc, "BOOTING", "Initializing Engine...", 10)
     import torch
     from ultralytics import YOLO
@@ -875,7 +918,12 @@ async def main():
             sys.exit(1)
         _probe_source = VIDEO_PATH
 
-    probe_cap = cv2.VideoCapture(_probe_source)
+    # Force TCP transport — avoids 461 Unsupported Transport on most drones / MediaMTX
+    if DRONE_MODE == "real":
+        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+        print("[VDRONE] RTSP transport forced to TCP")
+
+    probe_cap = cv2.VideoCapture(_probe_source, cv2.CAP_FFMPEG)
     if not probe_cap.isOpened():
         print(f"[VDRONE] FATAL: Cannot open video source: {_probe_source}")
         sys.exit(1)
@@ -894,7 +942,9 @@ async def main():
         if DRONE_MODE == "real":
             for i in range(1, RTSP_MAX_RECONNECTS + 1):
                 print(f"[VDRONE] REAL — opening RTSP (attempt {i}/{RTSP_MAX_RECONNECTS}): {REAL_DRONE_RTSP_URL}")
-                cap = cv2.VideoCapture(REAL_DRONE_RTSP_URL)
+                # CAP_FFMPEG + env OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp
+                # forces TCP which fixes '461 Unsupported Transport' on most drones
+                cap = cv2.VideoCapture(REAL_DRONE_RTSP_URL, cv2.CAP_FFMPEG)
                 if cap.isOpened():
                     print(f"[VDRONE] RTSP stream opened successfully")
                     return cap
@@ -1010,18 +1060,34 @@ async def main():
             is_live = (DRONE_MODE == "real")
             print(f"[VDRONE] ▶ ACTIVE — {'live RTSP stream' if is_live else f'{total_frames} frames at {fps:.1f} fps'}...")
 
-            # ── Mission Recorder: VideoWriter (writes AI-annotated frames to MP4) ──────
+            # ── Mission Recorder A: annotated writer (AI frames with bbox) ─────
             _rec_dir = os.getenv("RECORDING_DIR", "/recordings")
             os.makedirs(_rec_dir, exist_ok=True)
             _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             recording_path = os.path.join(_rec_dir, f"annotated_{_ts}.mp4")
+            # Fixed-name alias expected by Go DVR backend slicing logic
+            _fixed_dvr_path = os.path.join(_rec_dir, "output.mp4")
             _fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(recording_path, _fourcc, fps, (width, height))
             if writer.isOpened():
-                print(f"[VDRONE] ● REC — recording to: {recording_path}")
+                print(f"[VDRONE] ● REC ANNOTATED  — {recording_path}")
+                print(f"[VDRONE] ● REC alias: {_fixed_dvr_path} (Go DVR)")
             else:
-                print(f"[VDRONE] WARNING: VideoWriter failed to open — recording disabled")
+                print(f"[VDRONE] WARNING: Annotated VideoWriter failed — recording disabled")
                 writer = None
+
+            # ── Mission Recorder B: raw writer (clean frames, NO bbox) ────────
+            # Only in real mode — used for clean mission replay / DVR scrubbing
+            raw_writer      = None
+            raw_record_path = None
+            if is_live:
+                raw_record_path = os.path.join(_rec_dir, f"raw_{_ts}.mp4")
+                raw_writer = cv2.VideoWriter(raw_record_path, _fourcc, fps, (width, height))
+                if raw_writer.isOpened():
+                    print(f"[VDRONE] ● REC RAW (no bbox) — {raw_record_path}")
+                else:
+                    print(f"[VDRONE] WARNING: Raw VideoWriter failed")
+                    raw_writer = None
 
             # ── ACTIVE PROCESSING LOOP ──
             try:
@@ -1165,7 +1231,7 @@ async def main():
                             # KUNCI: Harus nunggu ANALYZED dulu!
                             if status == "ANALYZED":
                                 if cls_name not in ignore_classes:
-                                    # JIKA KAPAL BENERAN: Ambil fotonya!
+                                    # Snapshot: encode frame, stamp with fused telemetry
                                     try:
                                         single_obj_frame = draw_hud_from_cache(frame, [vis])
                                         h_frame, w_frame = single_obj_frame.shape[:2]
@@ -1173,6 +1239,15 @@ async def main():
                                         resized = cv2.resize(single_obj_frame, (SNAPSHOT_MAX_WIDTH, int(h_frame * scale)))
                                         _, buf = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 70])
                                         TRACKING_CACHE[tid]["snapshot_b64"] = base64.b64encode(buf.tobytes()).decode('ascii')
+
+                                        # ── SENSOR FUSION: stamp snapshot with exact telemetry at capture time ──
+                                        TRACKING_CACHE[tid]["snapshot_telemetry"] = (
+                                            dict(latest_telemetry_state) if latest_telemetry_state else None
+                                        )
+                                        TRACKING_CACHE[tid]["snapshot_timestamp"] = (
+                                            datetime.now(timezone.utc).isoformat()
+                                        )
+
                                         _snapshot_taken.add(tid)
                                     except Exception:
                                         pass
@@ -1191,6 +1266,11 @@ async def main():
                     # Done AFTER ffmpeg push so it never blocks the live stream.
                     if writer is not None and writer.isOpened():
                         writer.write(annotated)
+
+                    # ── Raw DVR: write CLEAN frame (before bounding boxes) ──────
+                    # raw_writer only active in real mode (is_live=True)
+                    if raw_writer is not None and raw_writer.isOpened():
+                        raw_writer.write(frame)  # `frame` is the untouched source frame
 
                     # ── Publish detections to NATS (from TRACKING_CACHE) ──
                     now = time.monotonic()
@@ -1275,13 +1355,31 @@ async def main():
                     ffmpeg_proc.kill()
 
                 # ── Finalize MP4 recording (CRITICAL — must call before exit) ──
+                if raw_writer is not None:
+                    raw_writer.release()
+                    print(f"[VDRONE] ● RAW DVR FINALIZED — {raw_record_path}")
                 if writer is not None:
                     writer.release()
                     print(f"[VDRONE] ● REC FINALIZED — {recording_path}")
+                    # Create/update fixed-name alias so Go backend can find it
+                    try:
+                        if os.path.exists(_fixed_dvr_path):
+                            os.remove(_fixed_dvr_path)
+                        os.symlink(recording_path, _fixed_dvr_path)
+                        print(f"[VDRONE] ● DVR alias created: {_fixed_dvr_path} -> {recording_path}")
+                    except Exception as sym_err:
+                        # Symlinks may fail on some filesystems — copy as fallback
+                        import shutil
+                        try:
+                            shutil.copy2(recording_path, _fixed_dvr_path)
+                            print(f"[VDRONE] ● DVR copied to: {_fixed_dvr_path}")
+                        except Exception:
+                            print(f"[VDRONE] WARNING: Could not create DVR alias: {sym_err}")
                     # Notify Go backend: recording is ready for MinIO upload
                     try:
                         await js.publish("MISSION.recording.ready", json.dumps({
                             "path": recording_path,
+                            "alias": _fixed_dvr_path,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                             "drone_mode": DRONE_MODE,
                         }).encode())

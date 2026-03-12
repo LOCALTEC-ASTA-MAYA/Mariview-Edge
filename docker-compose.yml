@@ -123,6 +123,7 @@ services:
       - ENABLE_DATALASTIC_API=${ENABLE_DATALASTIC_API:-false}
       - ADSB_API_KEY=${ADSB_API_KEY}
       - ENABLE_ADSB_API=${ENABLE_ADSB_API:-false}
+      - DISABLE_DRONE_SIM=${DISABLE_DRONE_SIM:-false}   # set true in .env to suppress simulator
     ports:
       - "8080:8080"
     volumes:

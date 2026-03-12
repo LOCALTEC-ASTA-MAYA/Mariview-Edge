@@ -104,7 +104,15 @@ func main() {
 	}
 
 	// Simulator: Publish mock drone telemetry (dev/demo mode)
-	simulator.StartDroneSimulator(natsClient.JetStream)
+	// ⚠️  DISABLE when using real_telemetry_bridge.py — both publish to
+	//    TELEMETRY.drone.live with the same asset_id, causing InfluxDB race.
+	//    Set DISABLE_DRONE_SIM=true in .env to suppress simulator.
+	if os.Getenv("DISABLE_DRONE_SIM") != "true" {
+		simulator.StartDroneSimulator(natsClient.JetStream)
+		log.Println("[CORE] 🟡 DroneSimulator active (set DISABLE_DRONE_SIM=true to disable)")
+	} else {
+		log.Println("[CORE] ✅ DroneSimulator suppressed (DISABLE_DRONE_SIM=true) — real bridge mode")
+	}
 
 	// Ingestor: TELEMETRY.adsb.live → InfluxDB
 	flightIngestor := ingestor.NewFlightIngestor(natsClient.JetStream, influx)

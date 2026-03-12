@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useMutation, useQuery } from '@apollo/client';
-import { CREATE_MISSION, START_MISSION, DELETE_MISSION, GET_MISSIONS, GET_PILOTS, GET_ASSETS } from '../graphql/queries';
+import { CREATE_MISSION, START_MISSION, DELETE_MISSION, GET_MISSIONS, GET_PILOTS, GET_ASSETS, GET_LIVE_DRONES } from '../graphql/queries';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -198,6 +198,15 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
   const [aiMessage, setAiMessage] = useState<string>('Connecting to AI system...');
   const [aiProgress, setAiProgress] = useState<number>(0);
 
+  // Pre-Flight System Checks
+  type CheckState = 'pending' | 'checking' | 'ok' | 'fail';
+  const [pfAI,      setPfAI]      = useState<CheckState>('pending');
+  const [pfRTSP,    setPfRTSP]    = useState<CheckState>('pending');
+  const [pfTelem,   setPfTelem]   = useState<CheckState>('pending');
+  const [pfMessage, setPfMessage] = useState<Record<string, string>>({
+    ai: 'Waiting for AI engine...', rtsp: 'Probing video stream...', telem: 'Listening for telemetry...'
+  });
+
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -233,6 +242,39 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
       ws?.close();
     };
   }, []);
+
+  // ─── Pre-Flight: Poll getLiveDrones every 3s for RTSP + Telemetry checks ───
+  const { data: liveDronesData } = useQuery(GET_LIVE_DRONES, {
+    pollInterval: 3000,
+    fetchPolicy: 'network-only',
+    skip: view !== 'pre-check-summary',  // only poll on the summary page
+  });
+
+  useEffect(() => {
+    const drones: any[] = liveDronesData?.getLiveDrones ?? [];
+    const active = drones.find((d: any) => d.lat !== 0 || d.lon !== 0);
+
+    if (active) {
+      // RTSP: drone is streaming (vision worker is alive and pushing frames)
+      setPfRTSP('ok');
+      setPfMessage(prev => ({ ...prev, rtsp: `Stream active — drone "${active.name || active.assetId}" detected` }));
+      // Telemetry: lat/lon coming from MAVLink bridge
+      setPfTelem('ok');
+      setPfMessage(prev => ({ ...prev, telem: `Lat ${active.lat?.toFixed(4)}, Lon ${active.lon?.toFixed(4)} | Alt ${active.alt?.toFixed(1)}m | Bat ${active.battery}%` }));
+    } else if (drones.length > 0) {
+      // Drones visible but with zero coords → no telemetry yet
+      setPfRTSP('ok');
+      setPfMessage(prev => ({ ...prev, rtsp: 'Vision worker online — awaiting RTSP frame data' }));
+      setPfTelem('checking');
+      setPfMessage(prev => ({ ...prev, telem: 'Bridge connected — waiting for MAVLink GPS lock…' }));
+    } else {
+      // Nothing in InfluxDB yet → both pending/fail
+      setPfRTSP('checking');
+      setPfMessage(prev => ({ ...prev, rtsp: 'No active stream detected — ensure DRONE_MODE=real and container running' }));
+      setPfTelem('checking');
+      setPfMessage(prev => ({ ...prev, telem: 'No telemetry in InfluxDB — check MAVLink bridge and injector' }));
+    }
+  }, [liveDronesData]);
 
   const handleStartAnalysis = () => {
     if (!selectedMission) return;
@@ -1897,64 +1939,152 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
               </Card>
             )}
 
-            {/* Launch Confirmation — Dynamic AI Status Banner */}
-            <Card className={`p-6 border ${aiStatus === 'IDLE'
-              ? 'bg-emerald-500/5 border-emerald-500/30'
-              : aiStatus === 'BOOTING'
-                ? 'bg-amber-500/5 border-amber-500/30'
-                : 'bg-red-500/5 border-red-500/30'
-              }`}>
-              <div className="flex items-start gap-3">
-                {aiStatus === 'IDLE' ? (
-                  <CheckCircle className="w-6 h-6 text-emerald-400 mt-0.5 flex-shrink-0" />
-                ) : aiStatus === 'BOOTING' ? (
-                  <div className="w-6 h-6 mt-0.5 flex-shrink-0 border-2 border-amber-400/30 border-t-amber-400 rounded-full animate-spin" />
-                ) : (
-                  <AlertCircle className="w-6 h-6 text-red-400 mt-0.5 flex-shrink-0" />
-                )}
-                <div className="flex-1">
-                  {aiStatus === 'IDLE' ? (
-                    <>
-                      <h3 className="font-semibold text-emerald-400 mb-1">Ready for Launch</h3>
-                      <p className="text-sm text-emerald-300/80">
-                        All systems operational. AI models loaded successfully. Click "Launch Mission" to begin operations.
-                      </p>
-                    </>
-                  ) : aiStatus === 'BOOTING' ? (
-                    <>
-                      <h3 className="font-semibold text-amber-400 mb-1">System Calibrating</h3>
-                      <p className="text-sm text-amber-300/80 mb-3">
-                        [SYSTEM BOOTING]: {aiMessage} ({aiProgress}%)
-                      </p>
-                      {/* Progress Bar */}
-                      <div className="w-full h-2.5 bg-gray-700 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-gradient-to-r from-amber-500 to-amber-400 rounded-full transition-all duration-700 ease-out"
-                          style={{ width: `${aiProgress}%` }}
-                        />
+            {/* ═══════════════════════════════════════════════════════════════
+                 PRE-FLIGHT SYSTEM CHECK — 3-step readiness gate
+                 1. AI Engine ready (WebSocket /ws/ai-status → IDLE)
+                 2. RTSP Stream reachable (getLiveDrones detects active drone)
+                 3. Telemetry alive (lat/lon non-zero from NATS bridge)
+            ═══════════════════════════════════════════════════════════════ */}
+            {(() => {
+              // Derive check states directly from live data
+              const aiOk    = aiStatus === 'IDLE';
+              const rtspOk  = pfRTSP === 'ok';
+              const telemOk = pfTelem === 'ok';
+              const passCount  = [aiOk, rtspOk, telemOk].filter(Boolean).length;
+              const totalReady = passCount === 3;
+              const pct        = Math.round((passCount / 3) * 100);
+
+              const checks = [
+                {
+                  key: 'ai',
+                  label: 'AI Engine',
+                  desc: aiOk
+                    ? 'YOLOv8 + CLIP loaded — ready'
+                    : aiStatus === 'BOOTING'
+                      ? `Loading models… ${aiProgress}%`
+                      : aiStatus === 'ACTIVE'
+                        ? 'Mission already active'
+                        : 'AI system offline — start docker service',
+                  ok: aiOk,
+                  warn: aiStatus === 'BOOTING' || aiStatus === 'ACTIVE',
+                  icon: <Brain className="w-4 h-4" />,
+                },
+                {
+                  key: 'rtsp',
+                  label: 'Video Stream (RTSP)',
+                  desc: pfMessage.rtsp,
+                  ok: rtspOk,
+                  warn: pfRTSP === 'checking',
+                  icon: <Radio className="w-4 h-4" />,
+                },
+                {
+                  key: 'telem',
+                  label: 'Telemetry (MAVLink → NATS)',
+                  desc: pfMessage.telem,
+                  ok: telemOk,
+                  warn: pfTelem === 'checking',
+                  icon: <Activity className="w-4 h-4" />,
+                },
+              ];
+
+              return (
+                <Card className={`p-5 border transition-all duration-500 ${
+                  totalReady
+                    ? 'bg-emerald-500/5 border-emerald-500/40'
+                    : passCount > 0
+                      ? 'bg-amber-500/5 border-amber-500/30'
+                      : 'bg-slate-800/60 border-slate-600/40'
+                }`}>
+                  {/* Header */}
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2.5 h-2.5 rounded-full ${
+                        totalReady ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-pulse'
+                      }`} />
+                      <span className={`font-semibold text-sm ${
+                        totalReady ? 'text-emerald-400' : 'text-amber-400'
+                      }`}>
+                        {totalReady ? '🟢 All Systems Ready — CLEARED FOR LAUNCH' : `System Check — ${pct}% Ready`}
+                      </span>
+                    </div>
+                    <span className={`text-xs font-mono px-2 py-0.5 rounded border ${
+                      totalReady
+                        ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10'
+                        : 'text-amber-400 border-amber-500/40 bg-amber-500/10'
+                    }`}>{passCount}/3 OK</span>
+                  </div>
+
+                  {/* Overall progress bar */}
+                  <div className="mb-4">
+                    <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                      <span>System Readiness</span>
+                      <span className={totalReady ? 'text-emerald-400' : 'text-amber-400'}>{pct}%</span>
+                    </div>
+                    <div className="h-2 bg-slate-700/80 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-700 ease-out ${
+                          totalReady
+                            ? 'bg-gradient-to-r from-emerald-600 to-emerald-400'
+                            : 'bg-gradient-to-r from-amber-600 to-amber-400'
+                        }`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Individual checks */}
+                  <div className="space-y-2">
+                    {checks.map(c => (
+                      <div key={c.key} className={`flex items-center gap-3 px-3 py-2 rounded-lg border transition-all duration-300 ${
+                        c.ok
+                          ? 'bg-emerald-500/10 border-emerald-500/30'
+                          : c.warn
+                            ? 'bg-amber-500/10 border-amber-500/30'
+                            : 'bg-slate-700/30 border-slate-600/40'
+                      }`}>
+                        {/* Icon */}
+                        <div className={`flex-shrink-0 ${
+                          c.ok ? 'text-emerald-400' : c.warn ? 'text-amber-400' : 'text-slate-500'
+                        }`}>{c.icon}</div>
+
+                        {/* Label + desc */}
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-xs font-semibold ${
+                            c.ok ? 'text-emerald-300' : c.warn ? 'text-amber-300' : 'text-slate-400'
+                          }`}>{c.label}</p>
+                          <p className="text-xs text-muted-foreground truncate">{c.desc}</p>
+                        </div>
+
+                        {/* Status badge */}
+                        {c.ok ? (
+                          <div className="flex items-center gap-1 text-emerald-400 flex-shrink-0">
+                            <CheckCircle className="w-4 h-4" />
+                            <span className="text-xs font-bold">PASS</span>
+                          </div>
+                        ) : c.warn ? (
+                          <div className="flex items-center gap-1 text-amber-400 flex-shrink-0">
+                            <div className="w-3.5 h-3.5 border-2 border-amber-400/30 border-t-amber-400 rounded-full animate-spin" />
+                            <span className="text-xs font-bold">WAIT</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1 text-slate-500 flex-shrink-0">
+                            <AlertCircle className="w-3.5 h-3.5" />
+                            <span className="text-xs font-bold">FAIL</span>
+                          </div>
+                        )}
                       </div>
-                      <p className="text-xs text-muted-foreground mt-2">
-                        Please wait for all AI models to finish loading before launching.
-                      </p>
-                    </>
-                  ) : aiStatus === 'ACTIVE' ? (
-                    <>
-                      <h3 className="font-semibold text-blue-400 mb-1">Mission Already Active</h3>
-                      <p className="text-sm text-blue-300/80">
-                        {aiMessage}
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <h3 className="font-semibold text-red-400 mb-1">AI Offline</h3>
-                      <p className="text-sm text-red-300/80">
-                        Connection lost or AI system not started. Check the backend logs.
-                      </p>
-                    </>
+                    ))}
+                  </div>
+
+                  {/* Footer tip */}
+                  {!totalReady && (
+                    <p className="text-xs text-muted-foreground mt-3 text-center">
+                      ⏳ Waiting for all 3 systems to clear before launch is enabled...
+                    </p>
                   )}
-                </div>
-              </div>
-            </Card>
+                </Card>
+              );
+            })()}
 
             {/* Action Buttons */}
             <div className="flex gap-3">
@@ -1967,7 +2097,7 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
               </Button>
               <Button
                 onClick={handleLaunchMission}
-                disabled={isLaunching || aiStatus !== 'IDLE'}
+                disabled={isLaunching || !(aiStatus === 'IDLE' && pfRTSP === 'ok' && pfTelem === 'ok')}
                 className="bg-[#22c55e] hover:bg-[#22c55e]/90 text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isLaunching ? (

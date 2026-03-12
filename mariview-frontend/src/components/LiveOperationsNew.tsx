@@ -594,10 +594,11 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                         </div>
                         {detectionHistory.filter(det => det.snapshot_b64).map((det, idx) => (
                           <motion.div
-                            key={`det-${idx}-${(det as any)._ts || ''}`}
-                            initial={{ opacity: 0, y: 20 }}
+                            key={`det-track-${det.track_id ?? idx}`}
+                            layout="position"
+                            initial={idx === 0 ? { opacity: 0, y: -16 } : false}
                             animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: idx < 3 ? idx * 0.1 : 0 }}
+                            transition={{ duration: 0.25, ease: 'easeOut' }}
                           >
                             <Card className="overflow-hidden bg-background/50 border-[#21A68D]/30 hover:border-[#21A68D]/60 transition-all">
                               {/* Card Header — Detection type + Confidence pill */}
@@ -636,6 +637,8 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
                                     src={`data:image/jpeg;base64,${det.snapshot_b64}`}
                                     alt={det.class}
                                     className="w-full h-full object-cover"
+                                    style={{ display: 'block', minHeight: 64 }}
+                                    decoding="async"
                                   />
                                   <div className="absolute top-2 right-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded text-[9px] font-bold tracking-wider border border-[#21A68D]/40">
                                     <span className="text-[#21A68D]">AI DETECTED</span>
