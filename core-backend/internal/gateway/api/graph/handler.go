@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -471,13 +472,17 @@ func mutateUpdateMissionStatus(db *gorm.DB, variables map[string]interface{}) (*
 		now := time.Now()
 		mission.EndedAt = &now
 
-		// Calculate real duration from StartedAt
+		// Calculate EXACT duration in seconds for precise DVR slicing
+		var durationSecs float64
 		if mission.StartedAt != nil {
-			mission.Duration = int(now.Sub(*mission.StartedAt).Minutes())
+			durationSecs = now.Sub(*mission.StartedAt).Seconds()
+			// Store as whole seconds in the duration column (was minutes — now seconds)
+			mission.Duration = int(math.Ceil(durationSecs))
 			if mission.Duration < 1 {
-				mission.Duration = 1 // minimum 1 minute
+				mission.Duration = 1
 			}
-			log.Printf("[GQL] Mission %s completed — duration: %d min", mission.MissionCode, mission.Duration)
+			log.Printf("[GQL] Mission %s completed — exact duration: %.1fs (%d stored)",
+				mission.MissionCode, durationSecs, mission.Duration)
 		}
 
 		// Count snapshots for this mission
@@ -488,7 +493,8 @@ func mutateUpdateMissionStatus(db *gorm.DB, variables map[string]interface{}) (*
 
 		// === DVR ENGINE: Stop recording and upload to MinIO ===
 		if mission.VideoPath == "" {
-			videoPath := stopAndUploadDVR(id)
+			// Pass startedAt so DVR can compute exact segment length
+			videoPath := stopAndUploadDVR(id, mission.StartedAt, &now)
 			mission.VideoPath = videoPath
 			log.Printf("[GQL] Mission %s — video path: %s", mission.MissionCode, videoPath)
 		}
@@ -516,29 +522,36 @@ func mutateStartMission(db *gorm.DB, variables map[string]interface{}) (*domain.
 	db.Save(&mission)
 
 	// === DVR ENGINE: Spawn ffmpeg to record in real-time ===
-	// -re forces real-time input speed (simulates live camera)
-	// No -stream_loop: if drone.mp4 ends before mission, that's a "signal lost" scenario
-	outFile := fmt.Sprintf("/tmp/mission_%s.mp4", id)
-	cmd := exec.Command("ffmpeg",
-		"-y",          // overwrite output
-		"-re",         // real-time input speed
-		"-i", "/app/drone.mp4", // source
-		"-c", "copy",  // stream copy (no re-encode, fast)
-		outFile,
-	)
-	cmd.Stdout = nil // suppress ffmpeg output in logs
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
-		log.Printf("[DVR] WARNING: ffmpeg failed to start for mission %s: %v", id, err)
-		// Non-fatal — mission still starts, just no recording
+	// In REAL mode: Python worker (virtual_drone.py) handles DVR recording
+	// via cv2.VideoWriter — no dummy FFmpeg needed here.
+	droneMode := os.Getenv("DRONE_MODE")
+	if droneMode == "real" {
+		log.Printf("[DVR] REAL MODE — skipping FFmpeg dummy DVR (Python worker records live RTSP)")
 	} else {
-		log.Printf("[DVR] Recording started → %s (pid=%d)", outFile, cmd.Process.Pid)
-		activeRecordings.Store(id, cmd)
-		// Reap the process asynchronously to avoid zombies
-		go func() {
-			cmd.Wait()
-			log.Printf("[DVR] ffmpeg process exited for mission %s (source ended or killed)", id)
-		}()
+		// VIRTUAL mode: spawn ffmpeg to copy drone.mp4 in real-time
+		// NOTE: no -t flag here — we don't know duration at start time.
+		// stopAndUploadDVR will re-slice the file with exact -t duration on completion.
+		outFile := fmt.Sprintf("/tmp/mission_%s_raw.mp4", id)
+		cmd := exec.Command("ffmpeg",
+			"-y",                  // overwrite output
+			"-re",                 // real-time input speed
+			"-stream_loop", "-1", // loop forever — we'll cut to exact duration on stop
+			"-i", "/app/drone.mp4", // source
+			"-c", "copy",          // stream copy (no re-encode)
+			outFile,
+		)
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		if err := cmd.Start(); err != nil {
+			log.Printf("[DVR] WARNING: ffmpeg failed to start for mission %s: %v", id, err)
+		} else {
+			log.Printf("[DVR] Recording started (looping) → %s (pid=%d)", outFile, cmd.Process.Pid)
+			activeRecordings.Store(id, cmd)
+			go func() {
+				cmd.Wait()
+				log.Printf("[DVR] ffmpeg process exited for mission %s", id)
+			}()
+		}
 	}
 
 	db.Preload("Asset").Preload("Pilot").Preload("Snapshots").First(&mission, "id = ?", mission.ID)
@@ -647,24 +660,43 @@ func fallbackVideoURL() string {
 }
 
 // stopAndUploadDVR gracefully terminates the ffmpeg DVR process for a mission,
-// uploads the recorded file to MinIO, and returns the public video URL.
-func stopAndUploadDVR(missionID string) string {
+// slices the raw recording to the EXACT flight duration, uploads to MinIO,
+// and returns the public video URL.
+func stopAndUploadDVR(missionID string, startedAt *time.Time, endedAt *time.Time) string {
+	droneMode := os.Getenv("DRONE_MODE")
+
+	// ── REAL MODE: Python worker already wrote the file via cv2.VideoWriter ──
+	// No FFmpeg process to kill. Just find the recording and upload.
+	if droneMode == "real" {
+		log.Printf("[DVR] REAL MODE — skipping FFmpeg teardown (Python worker owns recording)")
+
+		// Python writes: /recordings/output.mp4 (symlink to annotated_YYYYMMDD_HHMMSS.mp4)
+		uploadFile := "/recordings/output.mp4"
+		if _, err := os.Stat(uploadFile); os.IsNotExist(err) {
+			// Fallback: find latest .mp4 in /recordings
+			log.Printf("[DVR] REAL: output.mp4 not found — scanning /recordings/ for latest MP4")
+			uploadFile = findLatestRecording("/recordings")
+			if uploadFile == "" {
+				log.Printf("[DVR] REAL: No recording found in /recordings — returning fallback")
+				return fallbackVideoURL()
+			}
+		}
+		log.Printf("[DVR] REAL: Using Python recording: %s", uploadFile)
+		return uploadFileToMinIO(missionID, uploadFile)
+	}
+
+	// ── VIRTUAL MODE: Two-step: stop raw loop → re-slice to exact duration ──
+	rawFile := fmt.Sprintf("/tmp/mission_%s_raw.mp4", missionID)
 	outFile := fmt.Sprintf("/tmp/mission_%s.mp4", missionID)
 
-	// --- Step 1: Retrieve and stop the ffmpeg process ---
+	// --- Step 1: SIGINT the looping FFmpeg to finalize the raw file ---
 	if raw, ok := activeRecordings.Load(missionID); ok {
 		cmd := raw.(*exec.Cmd)
-
-		// SIGINT causes ffmpeg to flush and finalize the MP4 (write moov atom).
-		// This is CRITICAL — Kill() would truncate the file and make it unplayable.
 		if cmd.Process != nil {
 			if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
-				// Process already exited naturally (e.g., 2-min drone.mp4 ran out during a 5-min flight)
-				log.Printf("[DVR] ffmpeg already exited for mission %s (signal lost scenario): %v", missionID, err)
+				log.Printf("[DVR] ffmpeg already exited for mission %s: %v", missionID, err)
 			} else {
 				log.Printf("[DVR] Sent SIGINT to ffmpeg (pid=%d) for mission %s", cmd.Process.Pid, missionID)
-
-				// Wait up to 5 seconds for clean exit
 				done := make(chan error, 1)
 				go func() { done <- cmd.Wait() }()
 				select {
@@ -678,32 +710,58 @@ func stopAndUploadDVR(missionID string) string {
 		}
 		activeRecordings.Delete(missionID)
 	} else {
-		log.Printf("[DVR] No active recording found for mission %s — may have ended naturally", missionID)
+		log.Printf("[DVR] No active recording for mission %s — may have exited naturally", missionID)
 	}
 
-	// --- Step 2: Upload recorded file to MinIO ---
-	// Priority: (1) FFmpeg DVR temp file, (2) Python AI-annotated MP4 from /recordings volume,
-	// (3) test.mp4 fallback
+	// --- Step 2: Re-slice to EXACT duration using -t flag ---
+	// Calculate exact seconds from startedAt → endedAt
+	var durationSecs float64 = 0
+	if startedAt != nil && endedAt != nil {
+		durationSecs = endedAt.Sub(*startedAt).Seconds()
+	}
+
 	uploadFile := outFile
-	if _, err := os.Stat(outFile); os.IsNotExist(err) {
-		// FFmpeg DVR file not found — try Python VideoWriter recording
-		log.Printf("[DVR] FFmpeg recording not found at %s — checking /recordings/ for AI-annotated MP4", outFile)
+	if _, err := os.Stat(rawFile); err == nil && durationSecs > 0 {
+		log.Printf("[DVR] Re-slicing %s → %s (duration=%.1fs)", rawFile, outFile, durationSecs)
+		sliceCmd := exec.Command("ffmpeg",
+			"-y",
+			"-i", rawFile,
+			"-t", fmt.Sprintf("%.3f", durationSecs), // exact flight duration
+			"-c:v", "copy",
+			"-c:a", "copy",
+			outFile,
+		)
+		sliceCmd.Stdout = nil
+		sliceCmd.Stderr = nil
+		if err := sliceCmd.Run(); err != nil {
+			log.Printf("[DVR] Re-slice failed for mission %s: %v — uploading raw", missionID, err)
+			uploadFile = rawFile // fallback: upload the unsliced raw
+		} else {
+			log.Printf("[DVR] Re-slice complete: %s (%.1fs)", outFile, durationSecs)
+			os.Remove(rawFile) // clean up raw after successful slice
+		}
+	} else if _, err := os.Stat(rawFile); err == nil {
+		// durationSecs is 0 (startedAt missing) — just upload raw as-is
+		log.Printf("[DVR] No duration info — uploading raw recording: %s", rawFile)
+		uploadFile = rawFile
+	} else {
+		// Raw file not found — try Python recording or test.mp4 fallback
+		log.Printf("[DVR] Raw recording not found at %s — checking /recordings/", rawFile)
 		uploadFile = findLatestRecording("/recordings")
 		if uploadFile == "" {
-			log.Printf("[DVR] No AI recording found in /recordings — falling back to test.mp4")
+			log.Printf("[DVR] No recording found — falling back to test.mp4")
 			uploadFile = "/app/test.mp4"
-		} else {
-			log.Printf("[DVR] Using AI-annotated recording: %s", uploadFile)
 		}
 	}
 
 	url := uploadFileToMinIO(missionID, uploadFile)
 
-	// --- Step 3: Clean up temp file ---
+	// --- Step 3: Clean up temp files ---
 	if uploadFile == outFile {
 		os.Remove(outFile)
-		log.Printf("[DVR] Cleaned up temp file: %s", outFile)
 	}
+	os.Remove(rawFile) // always clean raw (may already be gone if slice succeeded)
+	log.Printf("[DVR] Upload complete for mission %s → %s", missionID, url)
 
 	return url
 }

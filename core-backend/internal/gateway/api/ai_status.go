@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +22,16 @@ type AIStatusPayload struct {
 	Message   string `json:"message"`
 	Progress  int    `json:"progress"`
 	Timestamp string `json:"timestamp"`
+	DroneMode string `json:"drone_mode"` // "real" or "virtual" — from DRONE_MODE env var
+}
+
+// droneMode reads DRONE_MODE from env once (lower-cased, defaults to "virtual").
+func droneMode() string {
+	m := strings.ToLower(strings.TrimSpace(os.Getenv("DRONE_MODE")))
+	if m == "real" {
+		return "real"
+	}
+	return "virtual"
 }
 
 // AIStatusManager maintains the current AI readiness state (thread-safe)
@@ -53,7 +65,9 @@ func (m *AIStatusManager) GetStatus() string {
 func (m *AIStatusManager) GetPayload() []byte {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	data, _ := json.Marshal(m.current)
+	copy := m.current
+	copy.DroneMode = droneMode() // always stamp current mode
+	data, _ := json.Marshal(copy)
 	return data
 }
 
@@ -68,6 +82,7 @@ func (m *AIStatusManager) HandleNATSMessage(data []byte) {
 
 	m.mu.Lock()
 	m.current = payload
+	m.current.DroneMode = droneMode() // always stamp current mode
 	m.mu.Unlock()
 
 	log.Printf("[AI-STATUS] %s: %s", payload.Status, payload.Message)

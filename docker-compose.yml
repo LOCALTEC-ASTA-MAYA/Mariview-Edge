@@ -66,9 +66,10 @@ services:
   locallitix-video:
     image: bluenviron/mediamtx:latest
     ports:
-      - "8554:8554"
-      - "1935:1935"
-      - "8888:8888"
+      - "8554:8554"   # RTSP
+      - "1935:1935"   # RTMP
+      - "8888:8888"   # HLS
+      - "9997:9997"   # MediaMTX API (debug: curl localhost:9997/v3/paths/list)
     networks:
       - locallitix-net
 
@@ -123,6 +124,7 @@ services:
       - ENABLE_DATALASTIC_API=${ENABLE_DATALASTIC_API:-false}
       - ADSB_API_KEY=${ADSB_API_KEY}
       - ENABLE_ADSB_API=${ENABLE_ADSB_API:-false}
+      - DRONE_MODE=${DRONE_MODE:-virtual}                # real = live drone, virtual = simulation
       - DISABLE_DRONE_SIM=${DISABLE_DRONE_SIM:-false}   # set true in .env to suppress simulator
     ports:
       - "8080:8080"
@@ -164,6 +166,7 @@ services:
     volumes:
       - ./mariview-frontend/public/assets/drone.mp4:/app/videos/drone.mp4:ro
       - recordings-data:/recordings   # write AI-annotated MP4s here
+      - hf-cache:/root/.cache/huggingface  # persist CLIP/YOLO model cache across restarts
     environment:
       - NATS_URL=nats://locallitix-backbone:4222
       - MEDIAMTX_RTSP_URL=rtsp://locallitix-video:8554/drone-cam
@@ -191,10 +194,12 @@ services:
     environment:
       - NATS_URL=nats://locallitix-backbone:4222
     ports:
-      - "14550:14550/udp"   # MAVLink UDP — GCS / Herelink directs here
+      - "14550:14550/udp"   # MAVLink UDP — mavlink_injector / GCS directs here
     restart: unless-stopped
+    # Remove profiles: so this starts automatically when DRONE_MODE=real
+    # To start: docker compose up -d locallitix-telemetry-bridge
     profiles:
-      - real                 # skipped in normal `docker compose up`; enable with --profile real
+      - real                 # still gated; start with: docker compose --profile real up -d
     networks:
       - locallitix-net
 
@@ -208,3 +213,4 @@ volumes:
   influx-data:
   minio-data:
   recordings-data:  # Shared between ai-vision (writer) and core-api (reader/uploader)
+  hf-cache:         # HuggingFace model cache — prevents re-download of CLIP (600MB) on restart

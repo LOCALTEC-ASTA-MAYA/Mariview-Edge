@@ -9,7 +9,7 @@ import { Label } from './ui/label';
 import { Checkbox } from './ui/checkbox';
 import { Textarea } from './ui/textarea';
 import { RadioGroup, RadioGroupItem } from './ui/radio-group';
-import { Plus, Edit, Trash2, CheckCircle, Users, Plane, ListChecks, ArrowLeft, AlertCircle, ChevronRight, MapPin, Square, Pentagon, Eraser, Radio, Brain, Ship, Anchor, BarChart3, Activity, History as LuHistory, Upload, FileVideo, FileJson, Cpu, Check, X } from 'lucide-react';
+import { Plus, Edit, Trash2, CheckCircle, Users, Plane, ListChecks, ArrowLeft, AlertCircle, ChevronRight, MapPin, Square, Pentagon, Eraser, Radio, Brain, Ship, Anchor, BarChart3, Activity, History as LuHistory, Upload, FileVideo, FileJson, Cpu, Check, X, Video } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from './ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
@@ -197,6 +197,7 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
   const [aiStatus, setAiStatus] = useState<string>('OFFLINE');
   const [aiMessage, setAiMessage] = useState<string>('Connecting to AI system...');
   const [aiProgress, setAiProgress] = useState<number>(0);
+  const [droneMode, setDroneMode] = useState<'real' | 'virtual'>('virtual'); // from /ws/ai-status
 
   // Pre-Flight System Checks
   type CheckState = 'pending' | 'checking' | 'ok' | 'fail';
@@ -222,6 +223,17 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
           if (data.status) setAiStatus(data.status);
           if (data.message) setAiMessage(data.message);
           if (data.progress !== undefined) setAiProgress(data.progress);
+          if (data.drone_mode) setDroneMode(data.drone_mode as 'real' | 'virtual');
+
+          // ── VIRTUAL MODE shortcut: AI idle → RTSP + Telemetry auto-PASS ──
+          // Virtual drone always has a video source (drone.mp4) and simulated telemetry.
+          // No need to wait for InfluxDB data.
+          if ((data.drone_mode ?? 'virtual') === 'virtual' && data.status === 'IDLE') {
+            setPfRTSP('ok');
+            setPfMessage(prev => ({ ...prev, rtsp: 'Virtual stream active — drone.mp4 loop running' }));
+            setPfTelem('ok');
+            setPfMessage(prev => ({ ...prev, telem: 'Simulated telemetry active — TelemetryState engine running' }));
+          }
         } catch { /* ignore parse errors */ }
       };
 
@@ -247,7 +259,8 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
   const { data: liveDronesData } = useQuery(GET_LIVE_DRONES, {
     pollInterval: 3000,
     fetchPolicy: 'network-only',
-    skip: view !== 'pre-check-summary',  // only poll on the summary page
+    // Only poll in REAL mode on the summary page — virtual drone data is confirmed via AI-status WS
+    skip: view !== 'pre-check-summary' || droneMode === 'virtual',
   });
 
   useEffect(() => {
@@ -684,6 +697,16 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
       await startMissionMutation({
         variables: { id: selectedMission.id },
       });
+
+      // ── Immediately start the drone engine so the HLS stream is ready
+      //    by the time LiveOperations mounts (no waiting on the other end) ──
+      try {
+        const res = await fetch('/api/drone/start', { method: 'POST', credentials: 'include' });
+        if (res.ok) console.log('🟢 Drone start command sent from Launch — stream will be ready');
+        else console.warn('Drone start response:', res.status);
+      } catch (droneErr) {
+        console.warn('Drone start failed (non-blocking):', droneErr);
+      }
 
       // Update local state optimistically
       setLocalMissions(prev => prev.map(m =>
@@ -1963,15 +1986,17 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                     : aiStatus === 'BOOTING'
                       ? `Loading models… ${aiProgress}%`
                       : aiStatus === 'ACTIVE'
-                        ? 'Mission already active'
-                        : 'AI system offline — start docker service',
+                        ? 'Mission already active — another mission is running'
+                        : aiStatus === 'OFFLINE'
+                          ? 'Connecting to AI engine… (container may still be booting)'
+                          : 'AI system unreachable — check docker logs',
                   ok: aiOk,
-                  warn: aiStatus === 'BOOTING' || aiStatus === 'ACTIVE',
+                  warn: aiStatus === 'BOOTING' || aiStatus === 'ACTIVE' || aiStatus === 'OFFLINE',
                   icon: <Brain className="w-4 h-4" />,
                 },
                 {
                   key: 'rtsp',
-                  label: 'Video Stream (RTSP)',
+                  label: droneMode === 'real' ? 'Video Stream (RTSP — Live Drone)' : 'Video Stream (Virtual — drone.mp4)',
                   desc: pfMessage.rtsp,
                   ok: rtspOk,
                   warn: pfRTSP === 'checking',
@@ -1979,7 +2004,7 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                 },
                 {
                   key: 'telem',
-                  label: 'Telemetry (MAVLink → NATS)',
+                  label: droneMode === 'real' ? 'Telemetry (MAVLink → NATS)' : 'Telemetry (Simulated Engine)',
                   desc: pfMessage.telem,
                   ok: telemOk,
                   warn: pfTelem === 'checking',
@@ -1995,86 +2020,259 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                       ? 'bg-amber-500/5 border-amber-500/30'
                       : 'bg-slate-800/60 border-slate-600/40'
                 }`}>
-                  {/* Header */}
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-2">
-                      <div className={`w-2.5 h-2.5 rounded-full ${
-                        totalReady ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-pulse'
-                      }`} />
-                      <span className={`font-semibold text-sm ${
-                        totalReady ? 'text-emerald-400' : 'text-amber-400'
-                      }`}>
-                        {totalReady ? '🟢 All Systems Ready — CLEARED FOR LAUNCH' : `System Check — ${pct}% Ready`}
-                      </span>
-                    </div>
-                    <span className={`text-xs font-mono px-2 py-0.5 rounded border ${
-                      totalReady
-                        ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10'
-                        : 'text-amber-400 border-amber-500/40 bg-amber-500/10'
-                    }`}>{passCount}/3 OK</span>
-                  </div>
-
-                  {/* Overall progress bar */}
-                  <div className="mb-4">
-                    <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                      <span>System Readiness</span>
-                      <span className={totalReady ? 'text-emerald-400' : 'text-amber-400'}>{pct}%</span>
-                    </div>
-                    <div className="h-2 bg-slate-700/80 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-700 ease-out ${
-                          totalReady
-                            ? 'bg-gradient-to-r from-emerald-600 to-emerald-400'
-                            : 'bg-gradient-to-r from-amber-600 to-amber-400'
-                        }`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Individual checks */}
-                  <div className="space-y-2">
-                    {checks.map(c => (
-                      <div key={c.key} className={`flex items-center gap-3 px-3 py-2 rounded-lg border transition-all duration-300 ${
-                        c.ok
-                          ? 'bg-emerald-500/10 border-emerald-500/30'
-                          : c.warn
-                            ? 'bg-amber-500/10 border-amber-500/30'
-                            : 'bg-slate-700/30 border-slate-600/40'
-                      }`}>
-                        {/* Icon */}
-                        <div className={`flex-shrink-0 ${
-                          c.ok ? 'text-emerald-400' : c.warn ? 'text-amber-400' : 'text-slate-500'
-                        }`}>{c.icon}</div>
-
-                        {/* Label + desc */}
-                        <div className="flex-1 min-w-0">
-                          <p className={`text-xs font-semibold ${
-                            c.ok ? 'text-emerald-300' : c.warn ? 'text-amber-300' : 'text-slate-400'
-                          }`}>{c.label}</p>
-                          <p className="text-xs text-muted-foreground truncate">{c.desc}</p>
+                  {/* ── Header with SVG ring progress ── */}
+                  {(() => {
+                    const r = 16; // ring radius
+                    const circ = 2 * Math.PI * r;
+                    const dash = circ * (pct / 100);
+                    const color = totalReady ? '#34d399' : passCount > 0 ? '#fbbf24' : '#475569';
+                    const trackColor = totalReady ? '#065f46' : '#422006';
+                    return (
+                      <div className="flex items-center justify-between mb-5">
+                        {/* Left: ring + title */}
+                        <div className="flex items-center gap-3">
+                          {/* SVG ring progress */}
+                          <div className="relative w-10 h-10 flex-shrink-0">
+                            <svg viewBox="0 0 40 40" className="w-10 h-10 -rotate-90">
+                              {/* Track */}
+                              <circle cx="20" cy="20" r={r} fill="none" stroke={trackColor} strokeWidth="3.5" />
+                              {/* Progress arc */}
+                              <circle
+                                cx="20" cy="20" r={r}
+                                fill="none"
+                                stroke={color}
+                                strokeWidth="3.5"
+                                strokeLinecap="round"
+                                strokeDasharray={`${circ}`}
+                                strokeDashoffset={`${circ - dash}`}
+                                style={{ transition: 'stroke-dashoffset 0.7s ease-out, stroke 0.5s' }}
+                              />
+                            </svg>
+                            {/* Center label */}
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              {totalReady ? (
+                                <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+                              ) : (
+                                <span className="text-[10px] font-black" style={{ color }}>{passCount}/3</span>
+                              )}
+                            </div>
+                          </div>
+                          <div>
+                            <p className={`text-sm font-bold leading-tight ${totalReady ? 'text-emerald-400' : 'text-amber-400'}`}>
+                              {totalReady ? 'All Systems Ready' : 'System Check'}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">
+                              {totalReady ? 'Cleared for launch' : `${pct}% — ${3 - passCount} check${3 - passCount !== 1 ? 's' : ''} remaining`}
+                            </p>
+                          </div>
                         </div>
-
-                        {/* Status badge */}
-                        {c.ok ? (
-                          <div className="flex items-center gap-1 text-emerald-400 flex-shrink-0">
-                            <CheckCircle className="w-4 h-4" />
-                            <span className="text-xs font-bold">PASS</span>
-                          </div>
-                        ) : c.warn ? (
-                          <div className="flex items-center gap-1 text-amber-400 flex-shrink-0">
-                            <div className="w-3.5 h-3.5 border-2 border-amber-400/30 border-t-amber-400 rounded-full animate-spin" />
-                            <span className="text-xs font-bold">WAIT</span>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-1 text-slate-500 flex-shrink-0">
-                            <AlertCircle className="w-3.5 h-3.5" />
-                            <span className="text-xs font-bold">FAIL</span>
-                          </div>
-                        )}
+                        {/* Right: badge */}
+                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border font-bold ${
+                          totalReady
+                            ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10'
+                            : 'text-amber-400 border-amber-500/40 bg-amber-500/10'
+                        }`}>{passCount}/3 OK</span>
                       </div>
-                    ))}
+                    );
+                  })()}
+
+                  {/* ── Per-stage animated check rows ── */}
+                  <div className="space-y-4">
+
+                    {/* ① AI ENGINE */}
+                    {(() => {
+                      const ok   = aiStatus === 'IDLE';
+                      const boot = aiStatus === 'BOOTING';
+                      const isWarn = ok || boot || aiStatus === 'ACTIVE' || aiStatus === 'OFFLINE';
+                      return (
+                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${
+                          ok ? 'bg-emerald-500/10 border-emerald-500/40' :
+                          isWarn ? 'bg-amber-500/[0.06] border-amber-500/25' :
+                          'bg-slate-800/50 border-slate-600/30'
+                        }`}>
+                          <div className="flex items-center gap-4 px-4 py-3.5">
+                            {/* Icon with dot indicator */}
+                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
+                              ok ? 'bg-emerald-500/15' : isWarn ? 'bg-amber-500/15' : 'bg-slate-700/50'
+                            }`}>
+                              <Brain className={`w-4 h-4 ${ok ? 'text-emerald-400' : isWarn ? 'text-amber-400' : 'text-slate-500'}`} />
+                              {!ok && isWarn && (
+                                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-amber-400 border border-slate-900" />
+                              )}
+                              {ok && (
+                                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 border border-slate-900" />
+                              )}
+                            </div>
+                            {/* Text */}
+                            <div className="flex-1 min-w-0">
+                              <p className={`text-xs font-bold tracking-wide ${ok ? 'text-emerald-300' : isWarn ? 'text-amber-300' : 'text-slate-400'}`}>
+                                AI Engine
+                              </p>
+                              <p className="text-[10px] text-muted-foreground mt-0.5">
+                                {ok ? 'YOLOv8 + CLIP fully loaded — ready to operate'
+                                 : boot ? `Loading AI models… ${aiProgress}%`
+                                 : aiStatus === 'OFFLINE' ? 'Connecting to AI system…'
+                                 : aiStatus === 'ACTIVE' ? 'Engine is active'
+                                 : 'AI system unreachable — check service'}
+                              </p>
+                            </div>
+                            {/* Status indicator */}
+                            {ok ? (
+                              <div className="flex items-center gap-1.5 text-emerald-400 flex-shrink-0">
+                                <CheckCircle className="w-4 h-4" />
+                                <span className="text-[10px] font-black tracking-widest">PASS</span>
+                              </div>
+                            ) : isWarn ? (
+                              <div className="flex items-center flex-shrink-0">
+                                <div className="w-5 h-5 rounded-full border-[2.5px] border-amber-400/20 border-t-amber-400 animate-spin flex-shrink-0" />
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1.5 text-red-400 flex-shrink-0">
+                                <AlertCircle className="w-4 h-4" />
+                                <span className="text-[10px] font-black tracking-widest">FAIL</span>
+                              </div>
+                            )}
+                          </div>
+                          {/* BOOTING progress bar */}
+                          {boot && (
+                            <div className="px-4 pb-3.5">
+                              <div className="h-1.5 bg-slate-700/60 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full rounded-full bg-gradient-to-r from-amber-600 via-amber-400 to-yellow-300 transition-all duration-700 ease-out"
+                                  style={{ width: `${aiProgress}%` }}
+                                />
+                              </div>
+                              <div className="flex justify-between mt-1">
+                                <span className="text-[9px] text-amber-400/50">Initializing AI vision pipeline…</span>
+                                <span className="text-[9px] font-mono text-amber-400">{aiProgress}%</span>
+                              </div>
+                            </div>
+                          )}
+                          {/* OFFLINE shimmer */}
+                          {aiStatus === 'OFFLINE' && (
+                            <div className="px-4 pb-3">
+                              <div className="h-0.5 bg-slate-700/40 rounded-full overflow-hidden">
+                                <div className="h-full w-2/5 rounded-full bg-gradient-to-r from-transparent via-amber-400/40 to-transparent animate-pulse" />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* ② VIDEO STREAM */}
+                    {(() => {
+                      const ok   = pfRTSP === 'ok';
+                      const wait = pfRTSP === 'checking';
+                      return (
+                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${
+                          ok ? 'bg-emerald-500/10 border-emerald-500/40' :
+                          wait ? 'bg-amber-500/[0.06] border-amber-500/25' :
+                          'bg-slate-800/50 border-slate-600/30'
+                        }`}>
+                          <div className="flex items-center gap-4 px-4 py-3.5">
+                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
+                              ok ? 'bg-emerald-500/15' : wait ? 'bg-amber-500/15' : 'bg-slate-700/50'
+                            }`}>
+                              <Video className={`w-4 h-4 ${ok ? 'text-emerald-400' : wait ? 'text-amber-400' : 'text-slate-500'}`} />
+                              {wait && (
+                                <span className="absolute inset-0 rounded-lg border-2 border-amber-400/40 animate-ping" style={{ animationDuration: '1.4s' }} />
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className={`text-xs font-bold tracking-wide ${ok ? 'text-emerald-300' : wait ? 'text-amber-300' : 'text-slate-400'}`}>
+                                Video Stream
+                              </p>
+                              <p className="text-[10px] text-muted-foreground mt-0.5">
+                                {ok ? 'Video stream is live and ready' : 'Establishing video stream connection…'}
+                              </p>
+                            </div>
+                            {ok ? (
+                              <div className="flex items-center gap-1.5 text-emerald-400 flex-shrink-0">
+                                <CheckCircle className="w-4 h-4" />
+                                <span className="text-[10px] font-black tracking-widest">PASS</span>
+                              </div>
+                            ) : wait ? (
+                              <div className="flex items-center flex-shrink-0">
+                                <div className="w-5 h-5 rounded-full border-[2.5px] border-amber-400/20 border-t-amber-400 animate-spin flex-shrink-0" />
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1.5 text-slate-500 flex-shrink-0">
+                                <AlertCircle className="w-4 h-4" />
+                                <span className="text-[10px] font-black tracking-widest">FAIL</span>
+                              </div>
+                            )}
+                          </div>
+                          {wait && (
+                            <div className="px-4 pb-3">
+                              <div className="flex items-end gap-0.5">
+                                {[3,6,4,9,5,7,4,8,5,6,3,7].map((h, i) => (
+                                  <div key={i} className="flex-1 rounded-sm bg-amber-400/25 animate-pulse"
+                                    style={{ height: `${h}px`, animationDelay: `${i * 0.07}s` }} />
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* ③ TELEMETRY */}
+                    {(() => {
+                      const ok   = pfTelem === 'ok';
+                      const wait = pfTelem === 'checking';
+                      return (
+                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${
+                          ok ? 'bg-emerald-500/10 border-emerald-500/40' :
+                          wait ? 'bg-amber-500/[0.06] border-amber-500/25' :
+                          'bg-slate-800/50 border-slate-600/30'
+                        }`}>
+                          <div className="flex items-center gap-4 px-4 py-3.5">
+                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
+                              ok ? 'bg-emerald-500/15' : wait ? 'bg-amber-500/15' : 'bg-slate-700/50'
+                            }`}>
+                              <Activity className={`w-4 h-4 ${ok ? 'text-emerald-400' : wait ? 'text-amber-400' : 'text-slate-500'}`} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className={`text-xs font-bold tracking-wide ${ok ? 'text-emerald-300' : wait ? 'text-amber-300' : 'text-slate-400'}`}>
+                                Telemetry
+                              </p>
+                              <p className="text-[10px] text-muted-foreground mt-0.5">
+                                {ok ? 'Live telemetry data received' : 'Waiting for telemetry signal…'}
+                              </p>
+                            </div>
+                            {ok ? (
+                              <div className="flex items-center gap-1.5 text-emerald-400 flex-shrink-0">
+                                <CheckCircle className="w-4 h-4" />
+                                <span className="text-[10px] font-black tracking-widest">PASS</span>
+                              </div>
+                            ) : wait ? (
+                              <div className="flex items-center flex-shrink-0">
+                                <div className="w-5 h-5 rounded-full border-[2.5px] border-amber-400/20 border-t-amber-400 animate-spin flex-shrink-0" />
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1.5 text-slate-500 flex-shrink-0">
+                                <AlertCircle className="w-4 h-4" />
+                                <span className="text-[10px] font-black tracking-widest">FAIL</span>
+                              </div>
+                            )}
+                          </div>
+                          {wait && (
+                            <div className="px-4 pb-3">
+                              <div className="flex items-center gap-1.5">
+                                {[0,1,2].map(i => (
+                                  <div key={i} className="w-2 h-2 rounded-full bg-amber-400/60 animate-bounce"
+                                    style={{ animationDelay: `${i * 0.2}s` }} />
+                                ))}
+                                <span className="text-[9px] text-amber-400/40 ml-1 animate-pulse">Listening…</span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
+
 
                   {/* Footer tip */}
                   {!totalReady && (

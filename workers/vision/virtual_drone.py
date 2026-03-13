@@ -524,8 +524,9 @@ SNAPSHOT_MAX_WIDTH = 1024  # full-frame snapshot max width (HD)
 
 
 async def api_worker(ais_service: "DatalasticService", telemetry: "TelemetryState",
-                     queue: asyncio.Queue, clip_model, clip_processor, device: str):
+                     queue: asyncio.Queue, clip_state: dict, device: str):
     """Background worker: Local CLIP classification + Datalastic AIS enrichment.
+    Reads clip_model/clip_processor from clip_state dict — supports late injection.
     Updates TRACKING_CACHE in-place — zero blocking on main video loop."""
     while True:
         try:
@@ -534,12 +535,12 @@ async def api_worker(ais_service: "DatalasticService", telemetry: "TelemetryStat
             break
 
         try:
-            # ────────────────────────────────────────────────
-            # STEP 1: Local CLIP Zero-Shot Classification
-            # ────────────────────────────────────────────────
-            classified_name = maritime_cls  # fallback if CLIP fails
+            # STEP 1: Local CLIP Zero-Shot Classification (skipped if CLIP not yet loaded)
+            clip_model = clip_state.get("model")
+            clip_processor = clip_state.get("processor")
+            classified_name = maritime_cls  # fallback if CLIP fails or not ready
 
-            if crop_b64:
+            if crop_b64 and clip_model is not None and clip_processor is not None:
                 try:
                     image = Image.open(io.BytesIO(base64.b64decode(crop_b64))).convert("RGB")
                     inputs = clip_processor(
@@ -561,6 +562,8 @@ async def api_worker(ais_service: "DatalasticService", telemetry: "TelemetryStat
                     print(f"[CLIP] Track #{track_id} → {classified_name} ({best_prob:.1%})")
                 except Exception as e:
                     print(f"[CLIP] Classification failed for track #{track_id}: {e}")
+            elif crop_b64 and clip_model is None:
+                print(f"[CLIP] Track #{track_id} — CLIP still loading, using YOLO label: {maritime_cls}")
 
             # ────────────────────────────────────────────────
             # STEP 2: Datalastic AIS enrichment
@@ -898,15 +901,33 @@ async def main():
     model = YOLO(YOLO_MODEL).to(device)
     print(f"[VDRONE] YOLO loaded on {device.upper()}. Classes: {len(model.names)}")
 
-    # ── Load CLIP model for zero-shot classification ──
-    await broadcast_status(nc, "BOOTING", "Loading CLIP Model (600MB)...", 80)
-    from transformers import CLIPProcessor, CLIPModel
-    clip_model_name = "openai/clip-vit-base-patch32"
-    print(f"[VDRONE] Loading CLIP model: {clip_model_name} ...")
-    clip_model = CLIPModel.from_pretrained(clip_model_name).to(device)
-    clip_processor = CLIPProcessor.from_pretrained(clip_model_name)
-    clip_model.eval()
-    print(f"[VDRONE] CLIP loaded on {device.upper()}. Candidates: {CLIP_CANDIDATES}")
+    # ── Load CLIP asynchronously in a background thread ───────────────────────
+    # Stream starts immediately after YOLO (now), CLIP joins in when ready.
+    from concurrent.futures import ThreadPoolExecutor
+
+    clip_state = {"model": None, "processor": None, "ready": False}
+
+    def _load_clip_sync(dev: str) -> None:
+        """Runs in a background thread — loads CLIP and writes into clip_state."""
+        try:
+            from transformers import CLIPProcessor, CLIPModel
+            _clip_name = "openai/clip-vit-base-patch32"
+            print(f"[VDRONE] [BG] Loading CLIP model: {_clip_name} ...")
+            _m = CLIPModel.from_pretrained(_clip_name).to(dev)
+            _p = CLIPProcessor.from_pretrained(_clip_name)
+            _m.eval()
+            clip_state["model"] = _m
+            clip_state["processor"] = _p
+            clip_state["ready"] = True
+            print(f"[VDRONE] [BG] ✅ CLIP ready on {dev.upper()} — classification now active")
+        except Exception as e:
+            print(f"[VDRONE] [BG] CLIP load failed: {e} — YOLO-only labels will be used")
+
+    _clip_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clip-loader")
+    _clip_future = asyncio.get_event_loop().run_in_executor(
+        _clip_executor, _load_clip_sync, device
+    )
+
 
     # ── Probe video source for dimensions (needed to configure FFmpeg) ────────
     if DRONE_MODE == "real":
@@ -918,14 +939,27 @@ async def main():
             sys.exit(1)
         _probe_source = VIDEO_PATH
 
-    # Force TCP transport — avoids 461 Unsupported Transport on most drones / MediaMTX
+    # ── DIRECTIVE 1: RTSP TRANSPORT FIX ──────────────────────────────────────
+    # Force UDP with TCP fallback — avoids 461 Unsupported Transport on drones
+    # that reject TCP-only negotiation (e.g. Hikvision, DJI, most IP cameras).
     if DRONE_MODE == "real":
-        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
-        print("[VDRONE] RTSP transport forced to TCP")
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        print("[VDRONE] RTSP transport forced to TCP (reliable for CCTV/IP cameras)")
 
-    probe_cap = cv2.VideoCapture(_probe_source, cv2.CAP_FFMPEG)
-    if not probe_cap.isOpened():
-        print(f"[VDRONE] FATAL: Cannot open video source: {_probe_source}")
+    # Probe with 3-second reconnect loop — don't crash container on cold start
+    probe_cap = None
+    for _probe_attempt in range(1, 11):
+        probe_cap = cv2.VideoCapture(_probe_source, cv2.CAP_FFMPEG)
+        if probe_cap.isOpened():
+            print(f"[VDRONE] Probe succeeded on attempt {_probe_attempt}")
+            break
+        print(f"[VDRONE] Probe attempt {_probe_attempt}/10 failed — retrying in 3s...")
+        probe_cap.release()
+        probe_cap = None
+        await asyncio.sleep(3)
+
+    if probe_cap is None or not probe_cap.isOpened():
+        print(f"[VDRONE] FATAL: Cannot open video source after 10 attempts: {_probe_source}")
         sys.exit(1)
     width  = int(probe_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(probe_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -942,8 +976,8 @@ async def main():
         if DRONE_MODE == "real":
             for i in range(1, RTSP_MAX_RECONNECTS + 1):
                 print(f"[VDRONE] REAL — opening RTSP (attempt {i}/{RTSP_MAX_RECONNECTS}): {REAL_DRONE_RTSP_URL}")
-                # CAP_FFMPEG + env OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp
-                # forces TCP which fixes '461 Unsupported Transport' on most drones
+                # env OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;udp|tcp
+                # tries UDP first then falls back to TCP if 461 Unsupported
                 cap = cv2.VideoCapture(REAL_DRONE_RTSP_URL, cv2.CAP_FFMPEG)
                 if cap.isOpened():
                     print(f"[VDRONE] RTSP stream opened successfully")
@@ -1001,8 +1035,23 @@ async def main():
     print("[VDRONE] Subscribed to COMMAND.drone.start / COMMAND.drone.stop")
 
     # ══════════════════════════════════════════════
-    #  OUTER LOOP: IDLE → wait for start → ACTIVE → back to IDLE
+    #  DIRECTIVE 2: GATEKEEPER STATE MACHINE
+    #  REAL mode:    RTSP cap opens ONCE at boot, frames drain continuously.
+    #                YOLO + snapshot + DVR only execute when engine_active.
+    #  VIRTUAL mode: cap opens per mission (existing behavior preserved).
     # ══════════════════════════════════════════════
+
+    is_live = (DRONE_MODE == "real")
+
+    # ── REAL MODE: Open RTSP once at boot to keep buffer draining ──
+    persistent_cap = None
+    if is_live:
+        try:
+            persistent_cap = open_video_source()
+            print("[VDRONE] 🎥 REAL: Persistent RTSP cap opened — always draining buffer")
+        except RuntimeError as e:
+            print(f"[VDRONE] FATAL: Cannot open persistent RTSP cap: {e}")
+            sys.exit(1)
 
     try:
         while not process_shutdown.is_set():
@@ -1012,9 +1061,35 @@ async def main():
             start_event.clear()
             stop_event.clear()
 
-            # Wait for either start command or process shutdown
-            while not process_shutdown.is_set() and not start_event.is_set():
-                await asyncio.sleep(0.25)
+            # In REAL mode: keep draining RTSP frames while IDLE (prevent buffer bloat)
+            if is_live and persistent_cap is not None:
+                print("[VDRONE] 🔄 REAL: Draining RTSP frames while IDLE...")
+                while not process_shutdown.is_set() and not start_event.is_set():
+                    try:
+                        # Use asyncio.to_thread — cap.read() is BLOCKING.
+                        # Without this, a Hikvision frame delay (slow GOP / keepalive gap)
+                        # blocks the entire event loop and triggers the OpenCV 30s interrupt,
+                        # causing a spurious ret=False and endless reconnect loop.
+                        ret, _ = await asyncio.wait_for(
+                            asyncio.to_thread(persistent_cap.read),
+                            timeout=5.0  # 5s max per frame — way below OpenCV's 30s interrupt
+                        )
+                    except asyncio.TimeoutError:
+                        ret = False  # treat as dropped → reconnect below
+                    if not ret:
+                        print("[VDRONE] RTSP frame read failed during IDLE drain — reconnecting...")
+                        persistent_cap.release()
+                        try:
+                            persistent_cap = open_video_source()
+                        except RuntimeError:
+                            print("[VDRONE] FATAL: RTSP reconnect failed during IDLE")
+                            break
+                    # No sleep needed — asyncio.to_thread already yields the event loop
+
+            else:
+                # VIRTUAL mode: just wait for start command
+                while not process_shutdown.is_set() and not start_event.is_set():
+                    await asyncio.sleep(0.25)
 
             if process_shutdown.is_set():
                 break
@@ -1046,26 +1121,29 @@ async def main():
             mission_queue = asyncio.Queue()
             worker_task = asyncio.create_task(
                 api_worker(ais_service, telemetry, mission_queue,
-                           clip_model, clip_processor, device)
+                           clip_state, device)
             )
 
-            # Open video / RTSP source for this mission
-            try:
-                cap = open_video_source()
-            except RuntimeError as e:
-                print(f"[VDRONE] ERROR: {e}")
-                engine_active = False
-                continue  # back to IDLE
+            # ── DIRECTIVE 3: TRUE LIVE DVR ──
+            # In REAL mode: reuse persistent_cap (already open, buffer drained)
+            # In VIRTUAL mode: open MP4 for this mission
+            if is_live:
+                cap = persistent_cap
+                print("[VDRONE] ▶ ACTIVE — reusing persistent RTSP cap (buffer freshly drained)")
+            else:
+                try:
+                    cap = open_video_source()
+                except RuntimeError as e:
+                    print(f"[VDRONE] ERROR: {e}")
+                    engine_active = False
+                    continue  # back to IDLE
+                print(f"[VDRONE] ▶ ACTIVE — {total_frames} frames at {fps:.1f} fps")
 
-            is_live = (DRONE_MODE == "real")
-            print(f"[VDRONE] ▶ ACTIVE — {'live RTSP stream' if is_live else f'{total_frames} frames at {fps:.1f} fps'}...")
-
-            # ── Mission Recorder A: annotated writer (AI frames with bbox) ─────
+            # ── DVR Writers (only created NOW on mission start) ─────
             _rec_dir = os.getenv("RECORDING_DIR", "/recordings")
             os.makedirs(_rec_dir, exist_ok=True)
             _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             recording_path = os.path.join(_rec_dir, f"annotated_{_ts}.mp4")
-            # Fixed-name alias expected by Go DVR backend slicing logic
             _fixed_dvr_path = os.path.join(_rec_dir, "output.mp4")
             _fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(recording_path, _fourcc, fps, (width, height))
@@ -1076,8 +1154,7 @@ async def main():
                 print(f"[VDRONE] WARNING: Annotated VideoWriter failed — recording disabled")
                 writer = None
 
-            # ── Mission Recorder B: raw writer (clean frames, NO bbox) ────────
-            # Only in real mode — used for clean mission replay / DVR scrubbing
+            # Raw DVR: clean frames (NO bbox) — real mode only
             raw_writer      = None
             raw_record_path = None
             if is_live:
@@ -1088,6 +1165,8 @@ async def main():
                 else:
                     print(f"[VDRONE] WARNING: Raw VideoWriter failed")
                     raw_writer = None
+
+            print("[VDRONE] ✅ DVR writers initialized — recording starts NOW")
 
             # ── ACTIVE PROCESSING LOOP ──
             try:
@@ -1241,12 +1320,27 @@ async def main():
                                         TRACKING_CACHE[tid]["snapshot_b64"] = base64.b64encode(buf.tobytes()).decode('ascii')
 
                                         # ── SENSOR FUSION: stamp snapshot with exact telemetry at capture time ──
-                                        TRACKING_CACHE[tid]["snapshot_telemetry"] = (
-                                            dict(latest_telemetry_state) if latest_telemetry_state else None
-                                        )
+                                        _fused = dict(latest_telemetry_state) if latest_telemetry_state else None
+                                        TRACKING_CACHE[tid]["snapshot_telemetry"] = _fused
                                         TRACKING_CACHE[tid]["snapshot_timestamp"] = (
                                             datetime.now(timezone.utc).isoformat()
                                         )
+
+                                        # ── DIRECTIVE 3: LOUD FUSION LOGGING ──
+                                        if _fused:
+                                            _lat = _fused.get('lat', 'N/A')
+                                            _lon = _fused.get('lon', 'N/A')
+                                            _alt = _fused.get('alt', 'N/A')
+                                            _hdg = _fused.get('heading', 'N/A')
+                                            _spd = _fused.get('spd', 'N/A')
+                                            cls_display = TRACKING_CACHE[tid].get('class_name', 'unknown')
+                                            print(f"[FUSION] 🎯 SNAPSHOT FUSED  | track_id={tid} | class={cls_display}")
+                                            print(f"[FUSION]    📍 GPS     : Lat={_lat}, Lon={_lon}")
+                                            print(f"[FUSION]    ✈️  Flight : Alt={_alt}m, Hdg={_hdg}°, Spd={_spd} m/s")
+                                            print(f"[FUSION]    fusion_status=true")
+                                        else:
+                                            print(f"[FUSION] ⚠️  SNAPSHOT (NO TELEMETRY) | track_id={tid} | fusion_status=false")
+                                            print(f"[FUSION]    Telemetry listener has not received data yet.")
 
                                         _snapshot_taken.add(tid)
                                     except Exception:
@@ -1277,6 +1371,33 @@ async def main():
                     if now - last_nats_publish >= PUBLISH_INTERVAL:
                         payload = tracking_cache_to_payload(frame_id, width, height)
                         payload["inference_ms"] = inference_ms
+
+                        # ── DIRECTIVE 2: SENSOR FUSION ── inject latest GPS into EVERY vision payload
+                        # This is separate from per-snapshot stamping: it gives the Go backend
+                        # the REAL POSITION of the drone on every published frame, enabling
+                        # server-side geofencing / heatmap and Mission History coordinates.
+                        if latest_telemetry_state is not None:
+                            payload["fusion_status"] = True
+                            payload["drone_position"] = {
+                                "lat":     latest_telemetry_state.get("lat"),
+                                "lon":     latest_telemetry_state.get("lon"),
+                                "alt":     latest_telemetry_state.get("alt"),
+                                "heading": latest_telemetry_state.get("heading"),
+                                "spd":     latest_telemetry_state.get("spd"),
+                            }
+                        else:
+                            payload["fusion_status"] = False
+                            # Fallback to simulated telemetry (virtual mode only)
+                            telem_snap = telemetry.tick(0, video_time=video_time)
+                            payload["drone_position"] = {
+                                "lat":     telem_snap.get("lat"),
+                                "lon":     telem_snap.get("lon"),
+                                "alt":     telem_snap.get("alt"),
+                                "heading": telem_snap.get("heading"),
+                                "spd":     telem_snap.get("spd"),
+                            }
+
+                        # Keep legacy `telemetry` field for backward-compat with Go AI adapter
                         telem_snap = telemetry.tick(0, video_time=video_time)
                         payload["telemetry"] = telem_snap
 
@@ -1345,8 +1466,13 @@ async def main():
                     except Exception:
                         pass
 
-                # Release video and FFmpeg
-                cap.release()
+                # ── GATEKEEPER: In REAL mode, do NOT release persistent_cap ──
+                # It stays open for the drain loop in IDLE. Only release in virtual mode.
+                if not is_live:
+                    cap.release()
+                    print("[VDRONE] VIRTUAL: cap released (will reopen next mission)")
+
+                # Release FFmpeg
                 if ffmpeg_proc.stdin:
                     ffmpeg_proc.stdin.close()
                 try:
@@ -1354,12 +1480,14 @@ async def main():
                 except Exception:
                     ffmpeg_proc.kill()
 
-                # ── Finalize MP4 recording (CRITICAL — must call before exit) ──
+                # ── DIRECTIVE 3: Strictly release DVR writers on mission end ──
                 if raw_writer is not None:
                     raw_writer.release()
+                    raw_writer = None
                     print(f"[VDRONE] ● RAW DVR FINALIZED — {raw_record_path}")
                 if writer is not None:
                     writer.release()
+                    writer = None
                     print(f"[VDRONE] ● REC FINALIZED — {recording_path}")
                     # Create/update fixed-name alias so Go backend can find it
                     try:
@@ -1390,6 +1518,10 @@ async def main():
                 print("[VDRONE] Resources released — returning to IDLE")
 
     finally:
+        # ── Process shutdown: release persistent RTSP cap if real mode ──
+        if persistent_cap is not None:
+            persistent_cap.release()
+            print("[VDRONE] REAL: Persistent RTSP cap released (process shutdown)")
         await ais_service.close()
         await nc.drain()
         print("[VDRONE] Clean shutdown complete. Goodbye!")

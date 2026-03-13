@@ -298,11 +298,14 @@ interface MissionHistoryProps {
 
 /**
  * calculateMissionDuration — single source of truth for mission duration (minutes).
- * Priority: DB duration field → endedAt - startedAt → live running time → 0
+ * NOTE: The DB stores duration in SECONDS since the DVR-slice fix (2026-03-13).
+ * This function converts to minutes for display + coverage formula.
+ * Priority: DB duration field (secs→mins) → endedAt - startedAt → live running time → 0
  */
 export function calculateMissionDuration(mission: any): number {
   const dbDur = Number(mission?.totalDuration ?? mission?.duration);
-  if (dbDur > 0) return dbDur;
+  // DB stores seconds → convert to minutes (ceil so 6s = 1min, 229s = 4min)
+  if (dbDur > 0) return Math.max(1, Math.ceil(dbDur / 60));
   const s = mission?.startedAt ? new Date(mission.startedAt).getTime() : 0;
   const isLive = String(mission?.status ?? '').toLowerCase().includes('live');
   const e = mission?.endedAt
@@ -499,6 +502,7 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
   const [isAnalyzeOpen, setIsAnalyzeOpen] = useState(false);
   const [isReplayOpen, setIsReplayOpen] = useState(false);
   const [zoomedReplayImage, setZoomedReplayImage] = useState<string | null>(null);
+  const [zoomedSnapshot, setZoomedSnapshot] = useState<any | null>(null);
   const [aoiNotes, setAoiNotes] = useState('');
   const [analyzedMission, setAnalyzedMission] = useState<typeof missions[0] | null>(null);
   const [showAIS, setShowAIS] = useState(true);
@@ -1738,13 +1742,20 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                           <div
                             key={snapshot.id || idx}
                             className="bg-[#0a0e1a]/80 rounded-lg border border-slate-700/50 overflow-hidden hover:border-[#21A68D]/60 hover:ring-1 hover:ring-[#21A68D]/40 transition-all group cursor-pointer"
-                            onClick={() => snapshot.snapshotUrl && setZoomedReplayImage(snapshot.snapshotUrl)}
-                          >                            <div className="relative aspect-video bg-slate-900">
+                            onClick={() => {
+                              if (snapshot.snapshotUrl) {
+                                setZoomedReplayImage(snapshot.snapshotUrl);
+                                setZoomedSnapshot(snapshot);
+                              }
+                            }}
+                          >
+                            {/* Image area with bottom gradient info bar */}
+                            <div className="relative aspect-video bg-slate-900">
                               {snapshot.snapshotUrl ? (
                                 <img
                                   src={snapshot.snapshotUrl}
                                   alt={snapshot.classification || 'Detection'}
-                                  className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                                  className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity"
                                 />
                               ) : (
                                 <div className="w-full h-full flex items-center justify-center">
@@ -1754,20 +1765,25 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
                                   </div>
                                 </div>
                               )}
-                              {/* Classification badge — top left */}
-                              <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-sm text-[9px] font-bold text-[#D4E268] uppercase tracking-wider">
-                                {snapshot.classification || 'Unknown'}
-                              </div>
-                              {/* Confidence badge — top right */}
-                              <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-sm text-[9px] font-mono text-white">
-                                {((Number(snapshot.confidence) || 0) * 100).toFixed(0)}%
-                              </div>
                             </div>
-                            <div className="px-2.5 py-2 flex items-center justify-between">
-                              <span className="text-[10px] font-semibold text-white/70">Track #{snapshot.trackId || idx + 1}</span>
-                              <span className="text-[9px] text-muted-foreground font-mono">
-                                {snapshot.detectedAt ? new Date(snapshot.detectedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}
-                              </span>
+                            {/* White info bar below image */}
+                            <div className="bg-white px-2.5 py-1.5">
+                              <div className="flex items-center justify-between gap-1">
+                                <span
+                                  className="text-[9px] font-bold text-slate-800 leading-tight truncate flex-1"
+                                  title={snapshot.classification || 'Unknown'}
+                                >
+                                  {snapshot.classification || 'Unknown'}
+                                </span>
+                                <span className="text-[9px] font-black text-[#21A68D] flex-shrink-0">
+                                  {((Number(snapshot.confidence) || 0) * 100).toFixed(0)}%
+                                </span>
+                              </div>
+                              <p className="text-[8px] text-slate-400 font-mono mt-0.5">
+                                {snapshot.detectedAt
+                                  ? new Date(snapshot.detectedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                                  : '—'}
+                              </p>
                             </div>
                           </div>
                         ))}
@@ -1837,19 +1853,55 @@ export default function MissionHistory({ onNavigateToLive }: MissionHistoryProps
         </Sheet>
 
         {/* TACTICAL ZOOM — Dialog correctly stacks over Sheet via Radix focus-scope */}
-        <Dialog open={!!zoomedReplayImage} onOpenChange={(open) => { if (!open) setZoomedReplayImage(null); }}>
+        <Dialog open={!!zoomedReplayImage} onOpenChange={(open) => { if (!open) { setZoomedReplayImage(null); setZoomedSnapshot(null); } }}>
           <DialogContent className="max-w-7xl w-[92vw] p-0 border-0 bg-transparent shadow-none overflow-hidden">
             <div className="relative rounded-xl overflow-hidden border border-[#21A68D]/30 shadow-2xl bg-[#0a0e1a]">
               <img
                 src={zoomedReplayImage ?? ''}
                 alt="AI Detection Zoom"
-                className="w-full object-contain max-h-[80vh] block"
+                className="w-full object-contain max-h-[75vh] block"
                 style={{ background: '#0a0e1a' }}
               />
-              {/* Explicit red CLOSE button overlaid on image */}
-
-              <div className="px-3 py-2 border-t border-[#21A68D]/20 bg-[#0a0e1a]/95">
-                <span className="text-[10px] text-[#21A68D] font-bold uppercase tracking-widest">AI Detection — Tactical Zoom</span>
+              {/* Metadata footer */}
+              <div className="px-4 py-3 border-t border-[#21A68D]/20 bg-[#0a0e1a]/98">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] text-[#21A68D] font-bold uppercase tracking-widest">AI Detection — Tactical Zoom</span>
+                  {zoomedSnapshot?.classification && (
+                    <span className="text-[10px] font-bold text-white px-2 py-0.5 rounded bg-[#21A68D]/20 border border-[#21A68D]/30">
+                      {zoomedSnapshot.classification}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  {/* Confidence */}
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase tracking-wider font-bold mb-0.5">Confidence</p>
+                    <p className="text-sm font-black" style={{ color: '#D4E268' }}>
+                      {zoomedSnapshot ? `${((Number(zoomedSnapshot.confidence) || 0) * 100).toFixed(1)}%` : '—'}
+                    </p>
+                  </div>
+                  {/* Location */}
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase tracking-wider font-bold mb-0.5">Location</p>
+                    <p className="text-[11px] font-mono text-white">
+                      {zoomedSnapshot?.lat != null && zoomedSnapshot?.lon != null
+                        ? `${Number(zoomedSnapshot.lat).toFixed(5)}, ${Number(zoomedSnapshot.lon).toFixed(5)}`
+                        : zoomedSnapshot?.location || '—'}
+                    </p>
+                  </div>
+                  {/* Timestamp */}
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase tracking-wider font-bold mb-0.5">Timestamp</p>
+                    <p className="text-[11px] font-mono text-white">
+                      {zoomedSnapshot?.detectedAt
+                        ? new Date(zoomedSnapshot.detectedAt).toLocaleString([], {
+                            month: 'short', day: 'numeric',
+                            hour: '2-digit', minute: '2-digit', second: '2-digit'
+                          })
+                        : '—'}
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </DialogContent>

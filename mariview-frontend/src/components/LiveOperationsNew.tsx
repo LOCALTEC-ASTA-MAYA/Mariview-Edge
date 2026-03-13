@@ -119,18 +119,9 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
     refetchQueries: [{ query: GET_MISSIONS }],
   });
 
-  // ── Wake drone engine on mount (IDLE → ACTIVE) — ONCE only ──
-  const hasStarted = useRef(false);
-  useEffect(() => {
-    if (hasStarted.current) return;
-    hasStarted.current = true;
-    fetch('/api/drone/start', { method: 'POST', credentials: 'include' })
-      .then(res => {
-        if (res.ok) console.log('🟢 Drone start command sent — engine will transition to ACTIVE');
-        else console.warn('Drone start response:', res.status);
-      })
-      .catch(err => console.warn('Drone start failed (non-blocking):', err));
-  }, []);
+  // ── Drone start is now handled in NewFlight.handleLaunchMission() ──
+  // The /api/drone/start command is called BEFORE navigating to LiveOps,
+  // so the HLS stream is already being served by the time this component mounts.
 
   // Video ready state — gates WebSocket data processing
   const [isVideoReady, setIsVideoReady] = useState(false);
@@ -275,13 +266,10 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
   }, [liveTelemetry?.alt, hasTakenOff, autoLandTriggered, selectedDrone]);
 
   // ── Flight Timer ──────────────────────────────────────────────────
-  // Counts from mission startedAt (if we have it) or from component mount.
-  const [flightTimeSecs, setFlightTimeSecs] = useState<number>(() => {
-    if (realMission?.startedAt) {
-      return Math.max(0, Math.floor((Date.now() - new Date(realMission.startedAt).getTime()) / 1000));
-    }
-    return 0;
-  });
+  // Uses absolute startTime anchored ONCE so it never resets between ticks.
+  // 500ms interval guarantees no visible 1-second skip on heavy renders.
+  const [flightTimeSecs, setFlightTimeSecs] = useState<number>(0);
+  const missionStartRef = useRef<number | null>(null);
 
   const formatTime = (s: number): string => {
     const h = Math.floor(s / 3600).toString().padStart(2, '0');
@@ -290,11 +278,29 @@ export default function LiveOperations({ missionId, onEndFlightComplete }: LiveO
     return `${h}:${m}:${sec}`;
   };
 
+  // Tick every 500ms — startTime anchored ONCE at interval creation
   useEffect(() => {
-    if (!missionId) return;   // timer runs immediately — represents mission duration, not stream
-    const id = setInterval(() => setFlightTimeSecs(s => s + 1), 1000);
+    if (!missionId) return;
+
+    // Anchor startTime immediately — use mission.startedAt if we have it, else now
+    if (missionStartRef.current === null) {
+      missionStartRef.current = realMission?.startedAt
+        ? new Date(realMission.startedAt).getTime()
+        : Date.now();
+    }
+
+    const id = setInterval(() => {
+      // start is always a fixed past timestamp — never Date.now()
+      const start = missionStartRef.current!;
+      setFlightTimeSecs(Math.floor((Date.now() - start) / 1000));
+    }, 500);
+
     return () => clearInterval(id);
-  }, [missionId]);
+  // Re-anchor if startedAt arrives after mount (e.g. from slower GraphQL)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [missionId, realMission?.startedAt]);
+
+
 
   // 3-second scan overlay — auto-hides regardless of HLS events
   const [showScanOverlay, setShowScanOverlay] = useState(true);
