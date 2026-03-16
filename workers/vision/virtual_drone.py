@@ -620,7 +620,8 @@ async def api_worker(ais_service: "DatalasticService", telemetry: "TelemetryStat
                     "estimatedGps": est_gps,
                     "status": "ANALYZED",
                 })
-                print(f"[WORKER] Track #{track_id} → {classified_name} | MMSI: {ais_data.get('mmsi', 'N/A')} ✓")
+                _mmsi_info = f"MMSI: {ais_data.get('mmsi', 'N/A')}" if ais_data else "no AIS"
+                print(f"[WORKER] Track #{track_id} → {classified_name} | {_mmsi_info} ✓")
 
         except Exception as e:
             print(f"[WORKER] Error processing track #{track_id}: {e}")

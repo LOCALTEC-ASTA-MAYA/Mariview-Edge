@@ -201,9 +201,9 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
 
   // Pre-Flight System Checks
   type CheckState = 'pending' | 'checking' | 'ok' | 'fail';
-  const [pfAI,      setPfAI]      = useState<CheckState>('pending');
-  const [pfRTSP,    setPfRTSP]    = useState<CheckState>('pending');
-  const [pfTelem,   setPfTelem]   = useState<CheckState>('pending');
+  const [pfAI, setPfAI] = useState<CheckState>('pending');
+  const [pfRTSP, setPfRTSP] = useState<CheckState>('pending');
+  const [pfTelem, setPfTelem] = useState<CheckState>('pending');
   const [pfMessage, setPfMessage] = useState<Record<string, string>>({
     ai: 'Waiting for AI engine...', rtsp: 'Probing video stream...', telem: 'Listening for telemetry...'
   });
@@ -1031,13 +1031,11 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                           <SelectValue placeholder="Select category" />
                         </SelectTrigger>
                         <SelectContent className="z-[10000]">
-                          <SelectItem value="Infrastructure Assessment">Infrastructure Assessment</SelectItem>
-                          <SelectItem value="Environmental Monitoring">Environmental Monitoring</SelectItem>
-                          <SelectItem value="Search and Rescue">Search and Rescue</SelectItem>
-                          <SelectItem value="Agriculture Survey">Agriculture Survey</SelectItem>
-                          <SelectItem value="Security Patrol">Security Patrol</SelectItem>
-                          <SelectItem value="Mapping and Survey">Mapping and Survey</SelectItem>
-                          <SelectItem value="Emergency Response">Emergency Response</SelectItem>
+                          <SelectItem value="Dark Vessel">Dark Vessel</SelectItem>
+                          <SelectItem value="AIS Off">AIS Off</SelectItem>
+                          <SelectItem value="Speed Anomaly">Speed Anomaly</SelectItem>
+                          <SelectItem value="Identity Mismatch">Identity Mismatch</SelectItem>
+                          <SelectItem value="Zone Violation">Zone Violation</SelectItem>
                           <SelectItem value="New Category">+ New Category</SelectItem>
                         </SelectContent>
                       </Select>
@@ -1970,12 +1968,12 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
             ═══════════════════════════════════════════════════════════════ */}
             {(() => {
               // Derive check states directly from live data
-              const aiOk    = aiStatus === 'IDLE';
-              const rtspOk  = pfRTSP === 'ok';
+              const aiOk = aiStatus === 'IDLE';
+              const rtspOk = pfRTSP === 'ok';
               const telemOk = pfTelem === 'ok';
-              const passCount  = [aiOk, rtspOk, telemOk].filter(Boolean).length;
+              const passCount = [aiOk, rtspOk, telemOk].filter(Boolean).length;
               const totalReady = passCount === 3;
-              const pct        = Math.round((passCount / 3) * 100);
+              const pct = Math.round((passCount / 3) * 100);
 
               const checks = [
                 {
@@ -2013,13 +2011,12 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
               ];
 
               return (
-                <Card className={`p-5 border transition-all duration-500 ${
-                  totalReady
-                    ? 'bg-emerald-500/5 border-emerald-500/40'
-                    : passCount > 0
-                      ? 'bg-amber-500/5 border-amber-500/30'
-                      : 'bg-slate-800/60 border-slate-600/40'
-                }`}>
+                <Card className={`p-5 border transition-all duration-500 ${totalReady
+                  ? 'bg-emerald-500/5 border-emerald-500/40'
+                  : passCount > 0
+                    ? 'bg-amber-500/5 border-amber-500/30'
+                    : 'bg-slate-800/60 border-slate-600/40'
+                  }`}>
                   {/* ── Header with SVG ring progress ── */}
                   {(() => {
                     const r = 16; // ring radius
@@ -2067,11 +2064,10 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                           </div>
                         </div>
                         {/* Right: badge */}
-                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border font-bold ${
-                          totalReady
-                            ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10'
-                            : 'text-amber-400 border-amber-500/40 bg-amber-500/10'
-                        }`}>{passCount}/3 OK</span>
+                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border font-bold ${totalReady
+                          ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10'
+                          : 'text-amber-400 border-amber-500/40 bg-amber-500/10'
+                          }`}>{passCount}/3 OK</span>
                       </div>
                     );
                   })()}
@@ -2081,20 +2077,18 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
 
                     {/* ① AI ENGINE */}
                     {(() => {
-                      const ok   = aiStatus === 'IDLE';
+                      const ok = aiStatus === 'IDLE';
                       const boot = aiStatus === 'BOOTING';
                       const isWarn = ok || boot || aiStatus === 'ACTIVE' || aiStatus === 'OFFLINE';
                       return (
-                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${
-                          ok ? 'bg-emerald-500/10 border-emerald-500/40' :
+                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${ok ? 'bg-emerald-500/10 border-emerald-500/40' :
                           isWarn ? 'bg-amber-500/[0.06] border-amber-500/25' :
-                          'bg-slate-800/50 border-slate-600/30'
-                        }`}>
+                            'bg-slate-800/50 border-slate-600/30'
+                          }`}>
                           <div className="flex items-center gap-4 px-4 py-3.5">
                             {/* Icon with dot indicator */}
-                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
-                              ok ? 'bg-emerald-500/15' : isWarn ? 'bg-amber-500/15' : 'bg-slate-700/50'
-                            }`}>
+                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${ok ? 'bg-emerald-500/15' : isWarn ? 'bg-amber-500/15' : 'bg-slate-700/50'
+                              }`}>
                               <Brain className={`w-4 h-4 ${ok ? 'text-emerald-400' : isWarn ? 'text-amber-400' : 'text-slate-500'}`} />
                               {!ok && isWarn && (
                                 <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-amber-400 border border-slate-900" />
@@ -2110,10 +2104,10 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                               </p>
                               <p className="text-[10px] text-muted-foreground mt-0.5">
                                 {ok ? 'YOLOv8 + CLIP fully loaded — ready to operate'
-                                 : boot ? `Loading AI models… ${aiProgress}%`
-                                 : aiStatus === 'OFFLINE' ? 'Connecting to AI system…'
-                                 : aiStatus === 'ACTIVE' ? 'Engine is active'
-                                 : 'AI system unreachable — check service'}
+                                  : boot ? `Loading AI models… ${aiProgress}%`
+                                    : aiStatus === 'OFFLINE' ? 'Connecting to AI system…'
+                                      : aiStatus === 'ACTIVE' ? 'Engine is active'
+                                        : 'AI system unreachable — check service'}
                               </p>
                             </div>
                             {/* Status indicator */}
@@ -2162,18 +2156,16 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
 
                     {/* ② VIDEO STREAM */}
                     {(() => {
-                      const ok   = pfRTSP === 'ok';
+                      const ok = pfRTSP === 'ok';
                       const wait = pfRTSP === 'checking';
                       return (
-                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${
-                          ok ? 'bg-emerald-500/10 border-emerald-500/40' :
+                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${ok ? 'bg-emerald-500/10 border-emerald-500/40' :
                           wait ? 'bg-amber-500/[0.06] border-amber-500/25' :
-                          'bg-slate-800/50 border-slate-600/30'
-                        }`}>
+                            'bg-slate-800/50 border-slate-600/30'
+                          }`}>
                           <div className="flex items-center gap-4 px-4 py-3.5">
-                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
-                              ok ? 'bg-emerald-500/15' : wait ? 'bg-amber-500/15' : 'bg-slate-700/50'
-                            }`}>
+                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${ok ? 'bg-emerald-500/15' : wait ? 'bg-amber-500/15' : 'bg-slate-700/50'
+                              }`}>
                               <Video className={`w-4 h-4 ${ok ? 'text-emerald-400' : wait ? 'text-amber-400' : 'text-slate-500'}`} />
                               {wait && (
                                 <span className="absolute inset-0 rounded-lg border-2 border-amber-400/40 animate-ping" style={{ animationDuration: '1.4s' }} />
@@ -2206,7 +2198,7 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                           {wait && (
                             <div className="px-4 pb-3">
                               <div className="flex items-end gap-0.5">
-                                {[3,6,4,9,5,7,4,8,5,6,3,7].map((h, i) => (
+                                {[3, 6, 4, 9, 5, 7, 4, 8, 5, 6, 3, 7].map((h, i) => (
                                   <div key={i} className="flex-1 rounded-sm bg-amber-400/25 animate-pulse"
                                     style={{ height: `${h}px`, animationDelay: `${i * 0.07}s` }} />
                                 ))}
@@ -2219,18 +2211,16 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
 
                     {/* ③ TELEMETRY */}
                     {(() => {
-                      const ok   = pfTelem === 'ok';
+                      const ok = pfTelem === 'ok';
                       const wait = pfTelem === 'checking';
                       return (
-                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${
-                          ok ? 'bg-emerald-500/10 border-emerald-500/40' :
+                        <div className={`rounded-xl border overflow-hidden transition-all duration-500 ${ok ? 'bg-emerald-500/10 border-emerald-500/40' :
                           wait ? 'bg-amber-500/[0.06] border-amber-500/25' :
-                          'bg-slate-800/50 border-slate-600/30'
-                        }`}>
+                            'bg-slate-800/50 border-slate-600/30'
+                          }`}>
                           <div className="flex items-center gap-4 px-4 py-3.5">
-                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
-                              ok ? 'bg-emerald-500/15' : wait ? 'bg-amber-500/15' : 'bg-slate-700/50'
-                            }`}>
+                            <div className={`relative flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${ok ? 'bg-emerald-500/15' : wait ? 'bg-amber-500/15' : 'bg-slate-700/50'
+                              }`}>
                               <Activity className={`w-4 h-4 ${ok ? 'text-emerald-400' : wait ? 'text-amber-400' : 'text-slate-500'}`} />
                             </div>
                             <div className="flex-1 min-w-0">
@@ -2260,7 +2250,7 @@ export default function NewFlight({ onMissionLaunch }: NewFlightProps) {
                           {wait && (
                             <div className="px-4 pb-3">
                               <div className="flex items-center gap-1.5">
-                                {[0,1,2].map(i => (
+                                {[0, 1, 2].map(i => (
                                   <div key={i} className="w-2 h-2 rounded-full bg-amber-400/60 animate-bounce"
                                     style={{ animationDelay: `${i * 0.2}s` }} />
                                 ))}

@@ -12,6 +12,9 @@ const STORAGE_KEYS = {
   FLIGHTS: 'mariview_flights',
   ASSETS: 'mariview_assets',
   SETTINGS: 'mariview_settings',
+  WEATHER_LOCATIONS: 'mariview_weather_locations',
+  DEFAULT_LOCATION: 'mariview_default_location',
+  FLIGHT_WEATHER_POLICY: 'mariview_flight_weather_policy',
 };
 
 // =====================================================
@@ -81,7 +84,7 @@ export function addMission(mission: Mission): Mission[] {
 
 export function updateMission(missionId: string, updates: Partial<Mission>): Mission[] {
   const missions = loadMissions();
-  const updated = missions.map(m => 
+  const updated = missions.map(m =>
     m.id === missionId ? { ...m, ...updates } : m
   );
   saveMissions(updated);
@@ -116,7 +119,7 @@ export function addDrone(drone: Drone): Drone[] {
 
 export function updateDrone(droneId: string, updates: Partial<Drone>): Drone[] {
   const drones = loadDrones();
-  const updated = drones.map(d => 
+  const updated = drones.map(d =>
     d.id === droneId ? { ...d, ...updates } : d
   );
   saveDrones(updated);
@@ -162,7 +165,7 @@ export function addAsset(asset: Asset): Asset[] {
 
 export function updateAsset(assetId: string, updates: Partial<Asset>): Asset[] {
   const assets = loadAssets();
-  const updated = assets.map(a => 
+  const updated = assets.map(a =>
     a.id === assetId ? { ...a, ...updates } : a
   );
   saveAssets(updated);
@@ -224,6 +227,71 @@ export function loadSettings(): AppSettings {
 }
 
 // =====================================================
+// WEATHER LOCATIONS STORAGE
+// =====================================================
+
+export interface WeatherLocation {
+  id: number;
+  name: string;
+  lat: string;
+  lng: string;
+}
+
+const defaultWeatherLocations: WeatherLocation[] = [
+  { id: 1, name: 'Kupang',        lat: '-10.1772', lng: '123.6070' },
+  { id: 2, name: 'Flores Timur',  lat: '-8.3600',  lng: '123.0100' },
+  { id: 3, name: 'Sumba Timur',   lat: '-9.6500',  lng: '120.2600' },
+  { id: 4, name: 'Atapupu',       lat: '-9.1000',  lng: '124.8900' },
+  { id: 5, name: 'Maumere',       lat: '-8.6200',  lng: '122.2100' },
+];
+
+export function saveWeatherLocations(locations: WeatherLocation[]): void {
+  saveToStorage(STORAGE_KEYS.WEATHER_LOCATIONS, locations);
+}
+
+export function loadWeatherLocations(): WeatherLocation[] {
+  return loadFromStorage(STORAGE_KEYS.WEATHER_LOCATIONS, defaultWeatherLocations);
+}
+
+export function saveDefaultLocation(location: WeatherLocation): void {
+  saveToStorage(STORAGE_KEYS.DEFAULT_LOCATION, location);
+}
+
+export function loadDefaultLocation(): WeatherLocation {
+  return loadFromStorage(STORAGE_KEYS.DEFAULT_LOCATION, defaultWeatherLocations[0]);
+}
+
+// =====================================================
+// FLIGHT WEATHER POLICY STORAGE
+// =====================================================
+
+export interface FlightWeatherPolicy {
+  maxWindKn: number;         // Max wind speed in knots
+  maxGustKn: number;         // Max gust speed in knots
+  minVisibilityKm: number;   // Minimum visibility in km
+  maxHumidity: number;       // Max humidity percentage
+  blockedWeather: string[];  // OWM "main" types that block flight
+  enforcementMode: 'NO_FLY' | 'CAUTION'; // NO_FLY = hard block, CAUTION = warning only
+}
+
+export const defaultFlightWeatherPolicy: FlightWeatherPolicy = {
+  maxWindKn: 20,
+  maxGustKn: 25,
+  minVisibilityKm: 5,
+  maxHumidity: 95,
+  blockedWeather: ['Thunderstorm', 'Tornado', 'Squall'],
+  enforcementMode: 'NO_FLY',
+};
+
+export function saveFlightWeatherPolicy(policy: FlightWeatherPolicy): void {
+  saveToStorage(STORAGE_KEYS.FLIGHT_WEATHER_POLICY, policy);
+}
+
+export function loadFlightWeatherPolicy(): FlightWeatherPolicy {
+  return loadFromStorage(STORAGE_KEYS.FLIGHT_WEATHER_POLICY, defaultFlightWeatherPolicy);
+}
+
+// =====================================================
 // INITIALIZATION
 // =====================================================
 
@@ -231,7 +299,7 @@ export function initializeStorage(): void {
   // Check if this is first time load
   const missions = localStorage.getItem(STORAGE_KEYS.MISSIONS);
   const drones = localStorage.getItem(STORAGE_KEYS.DRONES);
-  
+
   // If no data exists, initialize with mock data
   if (!missions) {
     saveMissions(initialMissions);

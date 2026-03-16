@@ -66,6 +66,7 @@ const getBatteryColor = (battery: number) => {
 export default function AssetManagement() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAsset, setSelectedAsset] = useState<any>(null);
+  const [activeTab, setActiveTab] = useState('uav');
 
   // GraphQL Fetching
   const { data: droneData } = useQuery(GET_DRONES);
@@ -131,7 +132,10 @@ export default function AssetManagement() {
     saveToStorage('mariview_assets_accessory', accessoryList);
   }, [accessoryList]);
 
-  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
+  const [isAddUavOpen, setIsAddUavOpen] = useState(false);
+  const [isAddAuvOpen, setIsAddAuvOpen] = useState(false);
+  const [isAddVehicleOpen, setIsAddVehicleOpen] = useState(false);
+  const [isAddAccessoryOpen, setIsAddAccessoryOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [currentCategory, setCurrentCategory] = useState('uav');
   const [editingAsset, setEditingAsset] = useState<any>(null);
@@ -141,44 +145,56 @@ export default function AssetManagement() {
     status: 'available',
     battery: 100,
     location: '',
-    serial: ''
+    serial: '',
+    maxDepth: 0,
+    plate: '',
+    fuel: 100,
+    mileage: 0,
+    quantity: 1,
+    capacity: '',
+    voltage: '',
   });
 
   // CRUD Functions
-  const handleAddAsset = () => {
-    const newId = `${currentCategory.toUpperCase()}-${String(Date.now()).slice(-3)}`;
+  const handleAddAsset = (category: string) => {
+    const prefix = category === 'vehicles' ? 'VEH' : category === 'accessories' ? 'ACC' : category.toUpperCase();
     const newAsset: any = {
-      ...assetForm,
-      id: `${currentCategory.toUpperCase()}-${Math.floor(Math.random() * 1000)}`,
+      name: assetForm.name,
+      type: assetForm.type,
+      status: assetForm.status,
+      location: assetForm.location,
+      id: `${prefix}-${Math.floor(Math.random() * 1000)}`,
     };
 
-    // Add category-specific defaults
-    if (currentCategory === 'uav') {
+    if (category === 'uav') {
+      newAsset.battery = assetForm.battery;
+      newAsset.serial = assetForm.serial;
       newAsset.flightHours = 0;
       newAsset.totalFlights = 0;
-    } else if (currentCategory === 'auv') {
+      setUavList([...uavList, newAsset]);
+      setIsAddUavOpen(false);
+    } else if (category === 'auv') {
+      newAsset.battery = assetForm.battery;
+      newAsset.serial = assetForm.serial;
       newAsset.diveHours = 0;
       newAsset.totalDives = 0;
-      newAsset.maxDepth = 0;
-    } else if (currentCategory === 'vehicles') {
-      newAsset.fuel = 100;
-      newAsset.mileage = 0;
-      newAsset.plate = 'B ' + Math.floor(Math.random() * 9000 + 1000) + ' XYZ';
-    } else if (currentCategory === 'accessories') {
-      newAsset.quantity = 1;
-    }
-
-    if (currentCategory === 'uav') {
-      setUavList([...uavList, newAsset]);
-    } else if (currentCategory === 'auv') {
+      newAsset.maxDepth = assetForm.maxDepth;
       setAuvList([...auvList, newAsset]);
-    } else if (currentCategory === 'vehicles') {
+      setIsAddAuvOpen(false);
+    } else if (category === 'vehicles') {
+      newAsset.fuel = assetForm.fuel;
+      newAsset.mileage = assetForm.mileage;
+      newAsset.plate = assetForm.plate;
       setVehicleList([...vehicleList, newAsset]);
-    } else {
+      setIsAddVehicleOpen(false);
+    } else if (category === 'accessories') {
+      newAsset.quantity = assetForm.quantity;
+      newAsset.capacity = assetForm.capacity;
+      newAsset.voltage = assetForm.voltage;
       setAccessoryList([...accessoryList, newAsset]);
+      setIsAddAccessoryOpen(false);
     }
 
-    setIsAddDialogOpen(false);
     resetForm();
   };
 
@@ -223,7 +239,14 @@ export default function AssetManagement() {
       status: asset.status,
       battery: asset.battery || 100,
       location: asset.location,
-      serial: asset.serial || ''
+      serial: asset.serial || '',
+      maxDepth: asset.maxDepth || 0,
+      plate: asset.plate || '',
+      fuel: asset.fuel || 100,
+      mileage: asset.mileage || 0,
+      quantity: asset.quantity || 1,
+      capacity: asset.capacity || '',
+      voltage: asset.voltage || '',
     });
     setIsEditDialogOpen(true);
   };
@@ -235,7 +258,14 @@ export default function AssetManagement() {
       status: 'available',
       battery: 100,
       location: '',
-      serial: ''
+      serial: '',
+      maxDepth: 0,
+      plate: '',
+      fuel: 100,
+      mileage: 0,
+      quantity: 1,
+      capacity: '',
+      voltage: '',
     });
   };
 
@@ -248,7 +278,7 @@ export default function AssetManagement() {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-3">
         <Card className="p-4 bg-card border-[#21A68D]">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-[#21A68D]/20 flex items-center justify-center">
@@ -298,35 +328,44 @@ export default function AssetManagement() {
         </Card>
       </div>
 
-      {/* Search */}
-      <Card className="p-4 bg-card border-border mb-6">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input
-            placeholder="Search assets by ID, name, or type..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-10 bg-input"
-          />
-        </div>
-      </Card>
-
       {/* Tabs for Asset Categories */}
+      <div className="flex justify-end mb-2">
+        {activeTab === 'uav' && (
+          <Button className="bg-[#21A68D] hover:bg-[#1a8a72] text-white" onClick={() => { setCurrentCategory('uav'); resetForm(); setIsAddUavOpen(true); }}>
+            <Plus className="w-4 h-4 mr-2" /> Add UAV
+          </Button>
+        )}
+        {activeTab === 'auv' && (
+          <Button className="bg-[#0F4C75] hover:bg-[#0b3a5a] text-white" onClick={() => { setCurrentCategory('auv'); resetForm(); setIsAddAuvOpen(true); }}>
+            <Plus className="w-4 h-4 mr-2" /> Add AUV
+          </Button>
+        )}
+        {activeTab === 'vehicles' && (
+          <Button style={{ backgroundColor: '#D4E268', color: '#000000' }} className="hover:opacity-90 font-semibold" onClick={() => { setCurrentCategory('vehicles'); resetForm(); setIsAddVehicleOpen(true); }}>
+            <Plus className="w-4 h-4 mr-2" /> Add Vehicle
+          </Button>
+        )}
+        {activeTab === 'accessories' && (
+          <Button style={{ backgroundColor: '#8b5cf6', color: '#ffffff' }} className="hover:opacity-90" onClick={() => { setCurrentCategory('accessories'); resetForm(); setIsAddAccessoryOpen(true); }}>
+            <Plus className="w-4 h-4 mr-2" /> Add Accessory
+          </Button>
+        )}
+      </div>
       <Tabs defaultValue="uav" className="w-full">
-        <TabsList className="grid w-full grid-cols-4 mb-6">
-          <TabsTrigger value="uav" className="data-[state=active]:bg-[#21A68D]">
+        <TabsList className="grid w-full grid-cols-4 mb-3">
+          <TabsTrigger value="uav" className="data-[state=active]:bg-[#21A68D]" onClick={() => setActiveTab('uav')}>
             <Plane className="w-4 h-4 mr-2" />
             UAV
           </TabsTrigger>
-          <TabsTrigger value="auv" className="data-[state=active]:bg-[#0F4C75]">
+          <TabsTrigger value="auv" className="data-[state=active]:bg-[#0F4C75]" onClick={() => setActiveTab('auv')}>
             <Ship className="w-4 h-4 mr-2" />
             AUV
           </TabsTrigger>
-          <TabsTrigger value="vehicles" className="data-[state=active]:bg-[#D4E268]">
+          <TabsTrigger value="vehicles" className="data-[state=active]:bg-[#D4E268]" onClick={() => setActiveTab('vehicles')}>
             <Car className="w-4 h-4 mr-2" />
             Vehicles
           </TabsTrigger>
-          <TabsTrigger value="accessories" className="data-[state=active]:bg-[#8b5cf6]">
+          <TabsTrigger value="accessories" className="data-[state=active]:bg-[#8b5cf6]" onClick={() => setActiveTab('accessories')}>
             <Package className="w-4 h-4 mr-2" />
             Accessories
           </TabsTrigger>
@@ -821,104 +860,262 @@ export default function AssetManagement() {
         </SheetContent>
       </Sheet>
 
-      {/* Add Asset Dialog */}
-      <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
-        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto">
+      {/* Add UAV Dialog */}
+      <Dialog open={isAddUavOpen} onOpenChange={setIsAddUavOpen}>
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh]">
           <DialogHeader>
-            <DialogTitle>Add New Asset</DialogTitle>
-            <DialogDescription>
-              Add a new asset to the inventory.
-            </DialogDescription>
+            <DialogTitle className="flex items-center gap-2">
+              <Plane className="w-5 h-5" style={{ color: '#21A68D' }} />
+              <span style={{ color: '#21A68D' }}>Add New UAV</span>
+            </DialogTitle>
+            <DialogDescription>Add a new UAV drone to the fleet.</DialogDescription>
           </DialogHeader>
-
-          <div className="mt-6 space-y-6">
+          <div className="mt-4 space-y-4">
             <div className="space-y-2">
               <Label>Name</Label>
-              <Input
-                type="text"
-                value={assetForm.name}
-                onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })}
-                className="bg-input"
-              />
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-input" placeholder="e.g. Pyrhos X V3" />
             </div>
-
             <div className="space-y-2">
               <Label>Type</Label>
-              <Input
-                type="text"
-                value={assetForm.type}
-                onChange={(e) => setAssetForm({ ...assetForm, type: e.target.value })}
-                className="bg-input"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Status</Label>
-              <Select
-                value={assetForm.status}
-                onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}
-              >
-                <SelectTrigger className="bg-input">
-                  <SelectValue placeholder="Select status">{assetForm.status}</SelectValue>
-                </SelectTrigger>
+              <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
+                <SelectTrigger className="bg-input"><SelectValue placeholder="Select type" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="available">Available</SelectItem>
-                  <SelectItem value="in-flight">In-Flight</SelectItem>
-                  <SelectItem value="in-use">In-Use</SelectItem>
-                  <SelectItem value="maintenance">Maintenance</SelectItem>
-                  <SelectItem value="charging">Charging</SelectItem>
+                  <SelectItem value="Aerial Quadcopter">Aerial Quadcopter</SelectItem>
+                  <SelectItem value="Tactical Drone">Tactical Drone</SelectItem>
+                  <SelectItem value="High Altitude">High Altitude</SelectItem>
+                  <SelectItem value="Fixed Wing">Fixed Wing</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-
-            <div className="space-y-2">
-              <Label>Battery Level</Label>
-              <Input
-                type="number"
-                value={assetForm.battery}
-                onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) })}
-                className="bg-input"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Location</Label>
-              <Input
-                type="text"
-                value={assetForm.location}
-                onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })}
-                className="bg-input"
-              />
-            </div>
-
             <div className="space-y-2">
               <Label>Serial Number</Label>
-              <Input
-                type="text"
-                value={assetForm.serial}
-                onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })}
-                className="bg-input"
-              />
+              <Input type="text" value={assetForm.serial} onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })} className="bg-input" placeholder="e.g. PXV3-2024-005" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Battery Level (%)</Label>
+                <Input type="number" value={assetForm.battery} onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) || 0 })} className="bg-input" min="0" max="100" />
+              </div>
+              <div className="space-y-2">
+                <Label>Status</Label>
+                <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
+                  <SelectTrigger className="bg-input"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="available">Available</SelectItem>
+                    <SelectItem value="in-flight">In-Flight</SelectItem>
+                    <SelectItem value="maintenance">Maintenance</SelectItem>
+                    <SelectItem value="charging">Charging</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Location</Label>
+              <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-input" placeholder="e.g. Hangar A" />
             </div>
           </div>
-
           <DialogTrigger className="hidden" />
-          <div className="mt-6 flex gap-3">
-            <Button
-              size="sm"
-              variant="outline"
-              className="w-full"
-              onClick={() => setIsAddDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              className="w-full bg-[#21A68D] hover:bg-[#1a8a72]"
-              onClick={handleAddAsset}
-            >
-              Add Asset
-            </Button>
+          <div className="mt-4 flex gap-3">
+            <Button variant="outline" className="flex-1" onClick={() => setIsAddUavOpen(false)}>Cancel</Button>
+            <Button className="flex-1 bg-[#21A68D] hover:bg-[#1a8a72]" onClick={() => handleAddAsset('uav')}>Add UAV</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add AUV Dialog */}
+      <Dialog open={isAddAuvOpen} onOpenChange={setIsAddAuvOpen}>
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Ship className="w-5 h-5" style={{ color: '#0F4C75' }} />
+              <span style={{ color: '#0F4C75' }}>Add New AUV</span>
+            </DialogTitle>
+            <DialogDescription>Add a new AUV to the fleet.</DialogDescription>
+          </DialogHeader>
+          <div className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <Label>Name</Label>
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-input" placeholder="e.g. DeepSeeker V2" />
+            </div>
+            <div className="space-y-2">
+              <Label>Type</Label>
+              <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
+                <SelectTrigger className="bg-input"><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Survey AUV">Survey AUV</SelectItem>
+                  <SelectItem value="Deep Sea AUV">Deep Sea AUV</SelectItem>
+                  <SelectItem value="Research AUV">Research AUV</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Serial Number</Label>
+              <Input type="text" value={assetForm.serial} onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })} className="bg-input" placeholder="e.g. DSV2-2024-004" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Battery Level (%)</Label>
+                <Input type="number" value={assetForm.battery} onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) || 0 })} className="bg-input" min="0" max="100" />
+              </div>
+              <div className="space-y-2">
+                <Label>Max Depth (m)</Label>
+                <Input type="number" value={assetForm.maxDepth} onChange={(e) => setAssetForm({ ...assetForm, maxDepth: parseInt(e.target.value) || 0 })} className="bg-input" min="0" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Status</Label>
+                <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
+                  <SelectTrigger className="bg-input"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="available">Available</SelectItem>
+                    <SelectItem value="maintenance">Maintenance</SelectItem>
+                    <SelectItem value="charging">Charging</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Location</Label>
+                <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-input" placeholder="e.g. Dock A" />
+              </div>
+            </div>
+          </div>
+          <DialogTrigger className="hidden" />
+          <div className="mt-4 flex gap-3">
+            <Button variant="outline" className="flex-1" onClick={() => setIsAddAuvOpen(false)}>Cancel</Button>
+            <Button className="flex-1 bg-[#0F4C75] hover:bg-[#0b3a5a]" onClick={() => handleAddAsset('auv')}>Add AUV</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Vehicle Dialog */}
+      <Dialog open={isAddVehicleOpen} onOpenChange={setIsAddVehicleOpen}>
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Car className="w-5 h-5" style={{ color: '#D4E268' }} />
+              <span style={{ color: '#D4E268' }}>Add New Vehicle</span>
+            </DialogTitle>
+            <DialogDescription>Add a new operational vehicle.</DialogDescription>
+          </DialogHeader>
+          <div className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <Label>Name</Label>
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-input" placeholder="e.g. Mobile Command Unit" />
+            </div>
+            <div className="space-y-2">
+              <Label>Type</Label>
+              <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
+                <SelectTrigger className="bg-input"><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Command Vehicle">Command Vehicle</SelectItem>
+                  <SelectItem value="Support Vehicle">Support Vehicle</SelectItem>
+                  <SelectItem value="Cargo Van">Cargo Van</SelectItem>
+                  <SelectItem value="Patrol Vehicle">Patrol Vehicle</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Plate Number</Label>
+              <Input type="text" value={assetForm.plate} onChange={(e) => setAssetForm({ ...assetForm, plate: e.target.value })} className="bg-input" placeholder="e.g. B 1234 XYZ" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Fuel Level (%)</Label>
+                <Input type="number" value={assetForm.fuel} onChange={(e) => setAssetForm({ ...assetForm, fuel: parseInt(e.target.value) || 0 })} className="bg-input" min="0" max="100" />
+              </div>
+              <div className="space-y-2">
+                <Label>Mileage (km)</Label>
+                <Input type="number" value={assetForm.mileage} onChange={(e) => setAssetForm({ ...assetForm, mileage: parseInt(e.target.value) || 0 })} className="bg-input" min="0" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Status</Label>
+                <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
+                  <SelectTrigger className="bg-input"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="available">Available</SelectItem>
+                    <SelectItem value="in-use">In-Use</SelectItem>
+                    <SelectItem value="maintenance">Maintenance</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Location</Label>
+                <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-input" placeholder="e.g. Base Garage" />
+              </div>
+            </div>
+          </div>
+          <DialogTrigger className="hidden" />
+          <div className="mt-4 flex gap-3">
+            <Button variant="outline" className="flex-1" onClick={() => setIsAddVehicleOpen(false)}>Cancel</Button>
+            <Button className="flex-1 bg-[#D4E268] hover:bg-[#c2d050] text-black" onClick={() => handleAddAsset('vehicles')}>Add Vehicle</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Accessory Dialog */}
+      <Dialog open={isAddAccessoryOpen} onOpenChange={setIsAddAccessoryOpen}>
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Package className="w-5 h-5" style={{ color: '#8b5cf6' }} />
+              <span style={{ color: '#8b5cf6' }}>Add New Accessory</span>
+            </DialogTitle>
+            <DialogDescription>Add a new accessory or equipment.</DialogDescription>
+          </DialogHeader>
+          <div className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <Label>Name</Label>
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-input" placeholder="e.g. LiPo Battery 6S" />
+            </div>
+            <div className="space-y-2">
+              <Label>Type</Label>
+              <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
+                <SelectTrigger className="bg-input"><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Battery">Battery</SelectItem>
+                  <SelectItem value="Camera">Camera</SelectItem>
+                  <SelectItem value="Propeller">Propeller</SelectItem>
+                  <SelectItem value="Sensor">Sensor</SelectItem>
+                  <SelectItem value="Charger">Charger</SelectItem>
+                  <SelectItem value="Controller">Controller</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Quantity</Label>
+                <Input type="number" value={assetForm.quantity} onChange={(e) => setAssetForm({ ...assetForm, quantity: parseInt(e.target.value) || 0 })} className="bg-input" min="0" />
+              </div>
+              <div className="space-y-2">
+                <Label>Status</Label>
+                <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
+                  <SelectTrigger className="bg-input"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="available">Available</SelectItem>
+                    <SelectItem value="in-use">In-Use</SelectItem>
+                    <SelectItem value="maintenance">Maintenance</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Capacity</Label>
+                <Input type="text" value={assetForm.capacity} onChange={(e) => setAssetForm({ ...assetForm, capacity: e.target.value })} className="bg-input" placeholder="e.g. 22000mAh" />
+              </div>
+              <div className="space-y-2">
+                <Label>Voltage</Label>
+                <Input type="text" value={assetForm.voltage} onChange={(e) => setAssetForm({ ...assetForm, voltage: e.target.value })} className="bg-input" placeholder="e.g. 22.2V" />
+              </div>
+            </div>
+          </div>
+          <DialogTrigger className="hidden" />
+          <div className="mt-4 flex gap-3">
+            <Button variant="outline" className="flex-1" onClick={() => setIsAddAccessoryOpen(false)}>Cancel</Button>
+            <Button className="flex-1 bg-[#8b5cf6] hover:bg-[#7c3aed]" onClick={() => handleAddAsset('accessories')}>Add Accessory</Button>
           </div>
         </DialogContent>
       </Dialog>
