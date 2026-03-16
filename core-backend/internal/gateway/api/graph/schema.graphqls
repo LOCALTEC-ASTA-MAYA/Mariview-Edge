@@ -18,7 +18,19 @@ type Asset {
     category: String!
     status: String!
     battery: Float!
+    serial: String
+    location: String
+    flightHours: Float
+    totalOps: Int
+    plate: String
+    quantity: Int
+    fuel: Float
+    mileage: Float
+    maxDepth: Float
+    capacity: String
+    voltage: String
     lastService: Time!
+    createdAt: Time!
 }
 
 type PreFlightCheck {
@@ -174,6 +186,45 @@ input UpdatePreFlightInput {
     communication: Boolean!
 }
 
+input CreateAssetInput {
+    name: String!
+    type: String!
+    category: String!
+    status: String
+    battery: Float
+    serial: String
+    location: String
+    flightHours: Float
+    totalOps: Int
+    plate: String
+    quantity: Int
+    fuel: Float
+    mileage: Float
+    maxDepth: Float
+    capacity: String
+    voltage: String
+}
+
+input UpdateAssetInput {
+    id: ID!
+    name: String
+    type: String
+    category: String
+    status: String
+    battery: Float
+    serial: String
+    location: String
+    flightHours: Float
+    totalOps: Int
+    plate: String
+    quantity: Int
+    fuel: Float
+    mileage: Float
+    maxDepth: Float
+    capacity: String
+    voltage: String
+}
+
 type Mutation {
     createMission(input: CreateMissionInput!): Mission!
     updateMissionStatus(id: ID!, status: String!): Mission!
@@ -184,4 +235,8 @@ type Mutation {
     
     startMission(id: ID!): Mission!
     abortMission(id: ID!): Mission!
+    
+    createAsset(input: CreateAssetInput!): Asset!
+    updateAsset(input: UpdateAssetInput!): Asset!
+    deleteAsset(id: ID!): Boolean!
 }

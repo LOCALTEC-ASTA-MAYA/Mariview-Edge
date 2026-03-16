@@ -103,7 +103,19 @@ export const GET_ASSETS = gql`
       category
       status
       battery
+      serial
+      location
+      flightHours
+      totalOps
+      plate
+      quantity
+      fuel
+      mileage
+      maxDepth
+      capacity
+      voltage
       lastService
+      createdAt
     }
   }
 `;
@@ -117,8 +129,50 @@ export const GET_ASSET_BY_ID = gql`
       category
       status
       battery
+      serial
+      location
+      flightHours
+      totalOps
+      plate
+      quantity
+      fuel
+      mileage
+      maxDepth
+      capacity
+      voltage
       lastService
+      createdAt
     }
+  }
+`;
+
+export const CREATE_ASSET = gql`
+  mutation CreateAsset($input: CreateAssetInput!) {
+    createAsset(input: $input) {
+      id
+      name
+      type
+      category
+      status
+    }
+  }
+`;
+
+export const UPDATE_ASSET = gql`
+  mutation UpdateAsset($input: UpdateAssetInput!) {
+    updateAsset(input: $input) {
+      id
+      name
+      type
+      category
+      status
+    }
+  }
+`;
+
+export const DELETE_ASSET = gql`
+  mutation DeleteAsset($id: ID!) {
+    deleteAsset(id: $id)
   }
 `;
 

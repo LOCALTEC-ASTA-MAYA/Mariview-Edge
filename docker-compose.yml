@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: supersecretpassword
       POSTGRES_MULTIPLE_DATABASES: locallitix_core,keycloak_db
     ports:
-      - "5432:5432"
+      - "${PORT_POSTGRES:-5432}:5432" # <-- Port Fleksibel
     volumes:
       - pg-data:/var/lib/postgresql/data
       - ./core-backend/scripts/init-multiple-psql-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-psql-dbs.sh
@@ -30,7 +30,7 @@ services:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
     ports:
-      - "8081:8080"
+      - "${PORT_KEYCLOAK:-8081}:8080" # <-- Port Fleksibel
     depends_on:
       - locallitix-postgres
     networks:
@@ -46,7 +46,7 @@ services:
       DOCKER_INFLUXDB_INIT_BUCKET: telemetry
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: locallitix-super-secret-token-123
     ports:
-      - "8086:8086"
+      - "${PORT_INFLUX:-8086}:8086" # <-- Port Fleksibel
     volumes:
       - influx-data:/var/lib/influxdb2
     networks:
@@ -56,8 +56,8 @@ services:
     image: nats:latest
     command: ["-js", "-sd", "/data"]
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "${PORT_NATS:-4222}:4222" # <-- Port Fleksibel
+      - "${PORT_NATS_MGT:-8222}:8222"
     volumes:
       - nats-data:/data
     networks:
@@ -66,19 +66,18 @@ services:
   locallitix-video:
     image: bluenviron/mediamtx:latest
     ports:
-      - "8554:8554"   # RTSP
-      - "1935:1935"   # RTMP
-      - "8888:8888"   # HLS
-      - "9997:9997"   # MediaMTX API (debug: curl localhost:9997/v3/paths/list)
+      - "${PORT_RTSP:-8554}:8554"   # <-- Port Fleksibel
+      - "${PORT_RTMP:-1935}:1935"   
+      - "${PORT_HLS:-8888}:8888"   
+      - "${PORT_MTX_API:-9997}:9997"   
     networks:
       - locallitix-net
 
   locallitix-minio:
     image: minio/minio:latest
-    container_name: locallitix-minio
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${PORT_MINIO:-9000}:9000" # <-- Port Fleksibel
+      - "${PORT_MINIO_UI:-9001}:9001"
     environment:
       MINIO_ROOT_USER: komandan
       MINIO_ROOT_PASSWORD: supersecretpassword
@@ -119,18 +118,14 @@ services:
       - MINIO_SECRET_KEY=supersecretpassword
       - COOKIE_DOMAIN=localhost
       - COOKIE_SECURE=false
-      - CORS_ORIGIN=http://localhost:3000
-      - DATALASTIC_API_KEY=${DATALASTIC_API_KEY}
-      - ENABLE_DATALASTIC_API=${ENABLE_DATALASTIC_API:-false}
-      - ADSB_API_KEY=${ADSB_API_KEY}
-      - ENABLE_ADSB_API=${ENABLE_ADSB_API:-false}
-      - DRONE_MODE=${DRONE_MODE:-virtual}                # real = live drone, virtual = simulation
-      - DISABLE_DRONE_SIM=${DISABLE_DRONE_SIM:-false}   # set true in .env to suppress simulator
+      - CORS_ORIGIN=http://localhost:${PORT_UI:-3000} # <-- Fleksibel untuk FE yang akses
+      - DRONE_MODE=${DRONE_MODE:-virtual}                
+      - DISABLE_DRONE_SIM=${DISABLE_DRONE_SIM:-false}   
     ports:
-      - "8080:8080"
+      - "${PORT_CORE:-8080}:8080" # <-- Port Fleksibel
     volumes:
       - ./mariview-frontend/public/assets/drone.mp4:/app/drone.mp4:ro
-      - recordings-data:/recordings   # read AI-annotated MP4s for MinIO upload
+      - recordings-data:/recordings   
     restart: unless-stopped
     dns:
       - 8.8.8.8
@@ -145,7 +140,7 @@ services:
     depends_on:
       - locallitix-core-api
     ports:
-      - "3000:80"
+      - "${PORT_UI:-3000}:80" # <-- Port Fleksibel
     restart: unless-stopped
     networks:
       - locallitix-net
@@ -165,8 +160,8 @@ services:
       - .env
     volumes:
       - ./mariview-frontend/public/assets/drone.mp4:/app/videos/drone.mp4:ro
-      - recordings-data:/recordings   # write AI-annotated MP4s here
-      - hf-cache:/root/.cache/huggingface  # persist CLIP/YOLO model cache across restarts
+      - recordings-data:/recordings   
+      - hf-cache:/root/.cache/huggingface  
     environment:
       - NATS_URL=nats://locallitix-backbone:4222
       - MEDIAMTX_RTSP_URL=rtsp://locallitix-video:8554/drone-cam
@@ -176,11 +171,6 @@ services:
     restart: unless-stopped
     networks:
       - locallitix-net
-
-  # ============================================
-  # MAVLink → NATS TELEMETRY BRIDGE (real drone only)
-  # Start: docker compose --profile real up -d locallitix-telemetry-bridge
-  # ============================================
 
   locallitix-telemetry-bridge:
     build:
@@ -194,12 +184,10 @@ services:
     environment:
       - NATS_URL=nats://locallitix-backbone:4222
     ports:
-      - "14550:14550/udp"   # MAVLink UDP — mavlink_injector / GCS directs here
+      - "${PORT_MAVLINK:-14550}:14550/udp" # <-- Port Fleksibel
     restart: unless-stopped
-    # Remove profiles: so this starts automatically when DRONE_MODE=real
-    # To start: docker compose up -d locallitix-telemetry-bridge
     profiles:
-      - real                 # still gated; start with: docker compose --profile real up -d
+      - real                 
     networks:
       - locallitix-net
 
@@ -212,5 +200,5 @@ volumes:
   pg-data:
   influx-data:
   minio-data:
-  recordings-data:  # Shared between ai-vision (writer) and core-api (reader/uploader)
-  hf-cache:         # HuggingFace model cache — prevents re-download of CLIP (600MB) on restart
+  recordings-data:  
+  hf-cache:

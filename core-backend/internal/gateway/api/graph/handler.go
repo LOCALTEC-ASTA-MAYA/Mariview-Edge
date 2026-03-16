@@ -392,6 +392,30 @@ func resolveMutations(ctx context.Context, query string, variables map[string]in
 		result["deleteAllMissions"] = ok
 	}
 
+	if containsField(query, "createAsset") {
+		asset, err := mutateCreateAsset(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["createAsset"] = asset
+	}
+
+	if containsField(query, "updateAsset") {
+		asset, err := mutateUpdateAsset(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["updateAsset"] = asset
+	}
+
+	if containsField(query, "deleteAsset") {
+		ok, err := mutateDeleteAsset(db, variables)
+		if err != nil {
+			return nil, err
+		}
+		result["deleteAsset"] = ok
+	}
+
 	return result, nil
 }
 
@@ -834,6 +858,184 @@ func uploadFileToMinIO(missionID, filePath string) string {
 	url := fmt.Sprintf("http://%s/%s/%s", publicHost, bucket, objectName)
 	log.Printf("[MinIO] Uploaded %s → %s", filePath, url)
 	return url
+}
+
+// ===================================================
+// ASSET MUTATION RESOLVERS
+// ===================================================
+
+func mutateCreateAsset(db *gorm.DB, variables map[string]interface{}) (*domain.Asset, error) {
+	input, ok := variables["input"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	name, _ := input["name"].(string)
+	typ, _ := input["type"].(string)
+	category, _ := input["category"].(string)
+	if name == "" || typ == "" || category == "" {
+		return nil, fmt.Errorf("name, type, and category are required")
+	}
+
+	status, _ := input["status"].(string)
+	if status == "" {
+		status = "STANDBY"
+	}
+
+	asset := domain.Asset{
+		Name:        name,
+		Type:        typ,
+		Category:    category,
+		Status:      status,
+		Battery:     safeFloatInput(input["battery"]),
+		Serial:      safeStringInput(input["serial"]),
+		Location:    safeStringInput(input["location"]),
+		FlightHours: safeFloatInput(input["flightHours"]),
+		TotalOps:    safeIntInput(input["totalOps"]),
+		Plate:       safeStringInput(input["plate"]),
+		Quantity:    safeIntInput(input["quantity"]),
+		Fuel:        safeFloatInput(input["fuel"]),
+		Mileage:     safeFloatInput(input["mileage"]),
+		MaxDepth:    safeFloatInput(input["maxDepth"]),
+		Capacity:    safeStringInput(input["capacity"]),
+		Voltage:     safeStringInput(input["voltage"]),
+	}
+
+	if err := db.Create(&asset).Error; err != nil {
+		log.Printf("[GQL] Failed to create asset: %v", err)
+		return nil, fmt.Errorf("failed to create asset")
+	}
+	log.Printf("[GQL] ✅ Asset created: %s (ID: %s, Category: %s)", asset.Name, asset.ID, asset.Category)
+	return &asset, nil
+}
+
+func mutateUpdateAsset(db *gorm.DB, variables map[string]interface{}) (*domain.Asset, error) {
+	input, ok := variables["input"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	id, ok := input["id"].(string)
+	if !ok || id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+
+	var asset domain.Asset
+	if err := db.First(&asset, "id = ?", id).Error; err != nil {
+		return nil, fmt.Errorf("asset not found")
+	}
+
+	// Apply updates — only non-nil fields
+	updates := make(map[string]interface{})
+	if v, ok := input["name"].(string); ok && v != "" {
+		updates["name"] = v
+	}
+	if v, ok := input["type"].(string); ok && v != "" {
+		updates["type"] = v
+	}
+	if v, ok := input["category"].(string); ok && v != "" {
+		updates["category"] = v
+	}
+	if v, ok := input["status"].(string); ok && v != "" {
+		updates["status"] = v
+	}
+	if v, exists := input["battery"]; exists && v != nil {
+		updates["battery"] = safeFloatInput(v)
+	}
+	if v, ok := input["serial"].(string); ok {
+		updates["serial"] = v
+	}
+	if v, ok := input["location"].(string); ok {
+		updates["location"] = v
+	}
+	if v, exists := input["flightHours"]; exists && v != nil {
+		updates["flight_hours"] = safeFloatInput(v)
+	}
+	if v, exists := input["totalOps"]; exists && v != nil {
+		updates["total_ops"] = safeIntInput(v)
+	}
+	if v, ok := input["plate"].(string); ok {
+		updates["plate"] = v
+	}
+	if v, exists := input["quantity"]; exists && v != nil {
+		updates["quantity"] = safeIntInput(v)
+	}
+	if v, exists := input["fuel"]; exists && v != nil {
+		updates["fuel"] = safeFloatInput(v)
+	}
+	if v, exists := input["mileage"]; exists && v != nil {
+		updates["mileage"] = safeFloatInput(v)
+	}
+	if v, exists := input["maxDepth"]; exists && v != nil {
+		updates["max_depth"] = safeFloatInput(v)
+	}
+	if v, ok := input["capacity"].(string); ok {
+		updates["capacity"] = v
+	}
+	if v, ok := input["voltage"].(string); ok {
+		updates["voltage"] = v
+	}
+
+	if len(updates) > 0 {
+		if err := db.Model(&asset).Updates(updates).Error; err != nil {
+			log.Printf("[GQL] Failed to update asset: %v", err)
+			return nil, fmt.Errorf("failed to update asset")
+		}
+		// Reload to get updated values
+		db.First(&asset, "id = ?", id)
+	}
+
+	log.Printf("[GQL] ✅ Asset updated: %s (ID: %s)", asset.Name, asset.ID)
+	return &asset, nil
+}
+
+func mutateDeleteAsset(db *gorm.DB, variables map[string]interface{}) (bool, error) {
+	id, ok := variables["id"].(string)
+	if !ok || id == "" {
+		return false, fmt.Errorf("id is required")
+	}
+
+	result := db.Delete(&domain.Asset{}, "id = ?", id)
+	if result.Error != nil {
+		log.Printf("[GQL] Failed to delete asset: %v", result.Error)
+		return false, fmt.Errorf("failed to delete asset")
+	}
+	if result.RowsAffected == 0 {
+		return false, fmt.Errorf("asset not found")
+	}
+
+	log.Printf("[GQL] ✅ Asset deleted: %s", id)
+	return true, nil
+}
+
+// safeStringInput extracts a string from an interface{}
+func safeStringInput(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// safeFloatInput extracts a float64 from an interface{}
+func safeFloatInput(v interface{}) float64 {
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	if f, ok := v.(int); ok {
+		return float64(f)
+	}
+	return 0
+}
+
+// safeIntInput extracts an int from an interface{}
+func safeIntInput(v interface{}) int {
+	if f, ok := v.(float64); ok {
+		return int(f)
+	}
+	if i, ok := v.(int); ok {
+		return i
+	}
+	return 0
 }
 
 // ===================================================

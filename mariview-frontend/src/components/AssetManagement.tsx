@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -6,49 +6,17 @@ import { Badge } from './ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
-import { Search, Battery, Calendar, Clock, Wrench, Plane, Ship, Car, Package, Plus, Edit, Trash2, Eye } from 'lucide-react';
+import { Search, Battery, Calendar, Clock, Wrench, Plane, Ship, Car, Package, Plus, Edit, Trash2, Eye, Loader2 } from 'lucide-react';
 import { Progress } from './ui/progress';
 import { Label } from './ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { saveToStorage, loadFromStorage } from '../utils/storage';
-import { useQuery } from '@apollo/client';
-import { GET_DRONES } from '../graphql/queries';
-
-// UAV Assets
-const uavAssets = [
-  { id: 'UAV-001', name: 'Pyrhos X V1', type: 'Aerial Quadcopter', battery: 100, status: 'available', flightHours: 245, totalFlights: 89, location: 'Hangar A', serial: 'PXV1-2024-001' },
-  { id: 'UAV-002', name: 'Pyrhos X V2', type: 'Aerial Quadcopter', battery: 85, status: 'in-flight', flightHours: 189, totalFlights: 67, location: 'Active Mission', serial: 'PXV2-2024-002' },
-  { id: 'UAV-003', name: 'AR-2 Aerial', type: 'Tactical Drone', battery: 95, status: 'available', flightHours: 156, totalFlights: 54, location: 'Hangar B', serial: 'AR2-2024-003' },
-  { id: 'UAV-004', name: 'Ephyros Alpha', type: 'High Altitude', battery: 78, status: 'charging', flightHours: 312, totalFlights: 102, location: 'Charging Station', serial: 'EPA-2024-004' },
-];
-
-// AUV Assets
-const auvAssets = [
-  { id: 'AUV-001', name: 'AquaScan Alpha', type: 'Survey AUV', battery: 92, status: 'available', diveHours: 123, totalDives: 34, location: 'Dock A', serial: 'ASA-2024-001', maxDepth: 500 },
-  { id: 'AUV-002', name: 'DeepSeeker Pro', type: 'Deep Sea AUV', battery: 78, status: 'maintenance', diveHours: 289, totalDives: 56, location: 'Maintenance Bay', serial: 'DSP-2024-002', maxDepth: 1000 },
-  { id: 'AUV-003', name: 'OceanExplorer', type: 'Research AUV', battery: 88, status: 'available', diveHours: 167, totalDives: 42, location: 'Dock B', serial: 'OEX-2024-003', maxDepth: 750 },
-];
-
-// Vehicle Assets (Mobil Operasional)
-const vehicleAssets = [
-  { id: 'VEH-001', name: 'Mobile Command Unit', type: 'Command Vehicle', fuel: 85, status: 'available', mileage: 12500, location: 'Base Garage', plate: 'B 1234 XYZ' },
-  { id: 'VEH-002', name: 'Field Support Truck', type: 'Support Vehicle', fuel: 92, status: 'in-use', mileage: 8900, location: 'Tanjung Priok', plate: 'B 5678 ABC' },
-  { id: 'VEH-003', name: 'Equipment Transport', type: 'Cargo Van', fuel: 67, status: 'available', mileage: 15300, location: 'Base Garage', plate: 'B 9012 DEF' },
-];
-
-// Accessories (Aksesoris Drone)
-const accessoryAssets = [
-  { id: 'BAT-001', name: 'LiPo Battery 6S', type: 'Battery', quantity: 24, status: 'available', capacity: '22000mAh', voltage: '22.2V', cycles: 45 },
-  { id: 'BAT-002', name: 'LiPo Battery 4S', type: 'Battery', quantity: 18, status: 'available', capacity: '16000mAh', voltage: '14.8V', cycles: 67 },
-  { id: 'CAM-001', name: 'Gimbal Camera 4K', type: 'Camera', quantity: 6, status: 'available', resolution: '4K 60fps', sensor: 'CMOS' },
-  { id: 'PRO-001', name: 'Carbon Fiber Propeller Set', type: 'Propeller', quantity: 32, status: 'available', size: '15 inch', material: 'Carbon Fiber' },
-  { id: 'SNS-001', name: 'Thermal Imaging Sensor', type: 'Sensor', quantity: 4, status: 'available', range: '640x512', sensitivity: '50mK' },
-  { id: 'CHG-001', name: 'Fast Charger Station', type: 'Charger', quantity: 8, status: 'available', output: '500W', ports: '4 ports' },
-];
+import { useQuery, useMutation } from '@apollo/client';
+import { GET_ASSETS, CREATE_ASSET, UPDATE_ASSET, DELETE_ASSET } from '../graphql/queries';
 
 const getStatusColor = (status: string) => {
   switch (status.toLowerCase()) {
-    case 'available': return '#22c55e';
+    case 'available':
+    case 'standby': return '#22c55e';
     case 'in-flight':
     case 'in-use': return '#21A68D';
     case 'maintenance': return '#D4E268';
@@ -68,69 +36,20 @@ export default function AssetManagement() {
   const [selectedAsset, setSelectedAsset] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('uav');
 
-  // GraphQL Fetching
-  const { data: droneData } = useQuery(GET_DRONES);
+  // GraphQL: fetch ALL assets from database
+  const { data, loading, refetch } = useQuery(GET_ASSETS);
+  const allAssets: any[] = data?.getAssets || [];
 
-  // State untuk CRUD dengan localStorage
-  const [uavList, setUavList] = useState<any[]>(() => loadFromStorage('mariview_assets_uav', uavAssets));
-  const [auvList, setAuvList] = useState<any[]>(() => loadFromStorage('mariview_assets_auv', auvAssets));
-  const [vehicleList, setVehicleList] = useState<any[]>(() => loadFromStorage('mariview_assets_vehicle', vehicleAssets));
-  const [accessoryList, setAccessoryList] = useState<any[]>(() => loadFromStorage('mariview_assets_accessory', accessoryAssets));
+  // Filter by category
+  const uavList = useMemo(() => allAssets.filter((a: any) => a.category === 'UAV'), [allAssets]);
+  const auvList = useMemo(() => allAssets.filter((a: any) => a.category === 'AUV'), [allAssets]);
+  const vehicleList = useMemo(() => allAssets.filter((a: any) => a.category === 'VEHICLE'), [allAssets]);
+  const accessoryList = useMemo(() => allAssets.filter((a: any) => a.category === 'ACCESSORY'), [allAssets]);
 
-  // Sync GraphQL data to local state
-  useEffect(() => {
-    if (droneData?.drones) {
-      const apiUavs = droneData.drones.filter((d: any) => d.type.toLowerCase().includes('aerial') || d.type.toUpperCase() === 'UAV');
-      const apiAuvs = droneData.drones.filter((d: any) => d.type.toLowerCase().includes('survey') || d.type.toLowerCase().includes('sea') || d.type.toUpperCase() === 'AUV');
-
-      if (apiUavs.length > 0) {
-        setUavList(prev => {
-          const merged = [...prev];
-          apiUavs.forEach((apiDrone: any) => {
-            const index = merged.findIndex(p => p.id === apiDrone.id);
-            if (index >= 0) {
-              merged[index] = { ...merged[index], ...apiDrone };
-            } else {
-              merged.push(apiDrone);
-            }
-          });
-          return merged;
-        });
-      }
-
-      if (apiAuvs.length > 0) {
-        setAuvList(prev => {
-          const merged = [...prev];
-          apiAuvs.forEach((apiDrone: any) => {
-            const index = merged.findIndex(p => p.id === apiDrone.id);
-            if (index >= 0) {
-              merged[index] = { ...merged[index], ...apiDrone };
-            } else {
-              merged.push(apiDrone);
-            }
-          });
-          return merged;
-        });
-      }
-    }
-  }, [droneData]);
-
-  // Auto-save to localStorage whenever lists change
-  useEffect(() => {
-    saveToStorage('mariview_assets_uav', uavList);
-  }, [uavList]);
-
-  useEffect(() => {
-    saveToStorage('mariview_assets_auv', auvList);
-  }, [auvList]);
-
-  useEffect(() => {
-    saveToStorage('mariview_assets_vehicle', vehicleList);
-  }, [vehicleList]);
-
-  useEffect(() => {
-    saveToStorage('mariview_assets_accessory', accessoryList);
-  }, [accessoryList]);
+  // GraphQL Mutations
+  const [createAsset] = useMutation(CREATE_ASSET, { onCompleted: () => refetch() });
+  const [updateAsset] = useMutation(UPDATE_ASSET, { onCompleted: () => refetch() });
+  const [deleteAsset] = useMutation(DELETE_ASSET, { onCompleted: () => refetch() });
 
   const [isAddUavOpen, setIsAddUavOpen] = useState(false);
   const [isAddAuvOpen, setIsAddAuvOpen] = useState(false);
@@ -155,60 +74,72 @@ export default function AssetManagement() {
     voltage: '',
   });
 
-  // CRUD Functions
-  const handleAddAsset = (category: string) => {
-    const prefix = category === 'vehicles' ? 'VEH' : category === 'accessories' ? 'ACC' : category.toUpperCase();
-    const newAsset: any = {
+  // CRUD Functions — all go to database via GraphQL
+  const handleAddAsset = async (category: string) => {
+    const catMap: Record<string, string> = {
+      uav: 'UAV', auv: 'AUV', vehicles: 'VEHICLE', accessories: 'ACCESSORY',
+    };
+
+    const input: any = {
       name: assetForm.name,
       type: assetForm.type,
-      status: assetForm.status,
+      category: catMap[category] || category.toUpperCase(),
+      status: assetForm.status || 'STANDBY',
       location: assetForm.location,
-      id: `${prefix}-${Math.floor(Math.random() * 1000)}`,
     };
 
     if (category === 'uav') {
-      newAsset.battery = assetForm.battery;
-      newAsset.serial = assetForm.serial;
-      newAsset.flightHours = 0;
-      newAsset.totalFlights = 0;
-      setUavList([...uavList, newAsset]);
+      input.battery = assetForm.battery;
+      input.serial = assetForm.serial;
       setIsAddUavOpen(false);
     } else if (category === 'auv') {
-      newAsset.battery = assetForm.battery;
-      newAsset.serial = assetForm.serial;
-      newAsset.diveHours = 0;
-      newAsset.totalDives = 0;
-      newAsset.maxDepth = assetForm.maxDepth;
-      setAuvList([...auvList, newAsset]);
+      input.battery = assetForm.battery;
+      input.serial = assetForm.serial;
+      input.maxDepth = assetForm.maxDepth;
       setIsAddAuvOpen(false);
     } else if (category === 'vehicles') {
-      newAsset.fuel = assetForm.fuel;
-      newAsset.mileage = assetForm.mileage;
-      newAsset.plate = assetForm.plate;
-      setVehicleList([...vehicleList, newAsset]);
+      input.fuel = assetForm.fuel;
+      input.mileage = assetForm.mileage;
+      input.plate = assetForm.plate;
       setIsAddVehicleOpen(false);
     } else if (category === 'accessories') {
-      newAsset.quantity = assetForm.quantity;
-      newAsset.capacity = assetForm.capacity;
-      newAsset.voltage = assetForm.voltage;
-      setAccessoryList([...accessoryList, newAsset]);
+      input.quantity = assetForm.quantity;
+      input.capacity = assetForm.capacity;
+      input.voltage = assetForm.voltage;
       setIsAddAccessoryOpen(false);
     }
 
+    try {
+      await createAsset({ variables: { input } });
+    } catch (err) {
+      console.error('Failed to create asset:', err);
+    }
     resetForm();
   };
 
-  const handleEditAsset = () => {
-    if (editingAsset) {
-      if (currentCategory === 'uav') {
-        setUavList(uavList.map((a: any) => a.id === editingAsset.id ? { ...a, ...assetForm } : a));
-      } else if (currentCategory === 'auv') {
-        setAuvList(auvList.map((a: any) => a.id === editingAsset.id ? { ...a, ...assetForm } : a));
-      } else if (currentCategory === 'vehicles') {
-        setVehicleList(vehicleList.map((a: any) => a.id === editingAsset.id ? { ...a, ...assetForm } : a));
-      } else {
-        setAccessoryList(accessoryList.map((a: any) => a.id === editingAsset.id ? { ...a, ...assetForm } : a));
-      }
+  const handleEditAsset = async () => {
+    if (!editingAsset) return;
+    const input: any = {
+      id: editingAsset.id,
+      name: assetForm.name,
+      type: assetForm.type,
+      status: assetForm.status,
+      battery: assetForm.battery,
+      location: assetForm.location,
+      serial: assetForm.serial,
+      fuel: assetForm.fuel,
+      mileage: assetForm.mileage,
+      plate: assetForm.plate,
+      maxDepth: assetForm.maxDepth,
+      quantity: assetForm.quantity,
+      capacity: assetForm.capacity,
+      voltage: assetForm.voltage,
+    };
+
+    try {
+      await updateAsset({ variables: { input } });
+    } catch (err) {
+      console.error('Failed to update asset:', err);
     }
 
     setIsEditDialogOpen(false);
@@ -216,16 +147,12 @@ export default function AssetManagement() {
     resetForm();
   };
 
-  const handleDeleteAsset = (assetId: string, category: string) => {
+  const handleDeleteAsset = async (assetId: string, _category: string) => {
     if (confirm('Are you sure you want to delete this asset?')) {
-      if (category === 'uav') {
-        setUavList(uavList.filter((a: any) => a.id !== assetId));
-      } else if (category === 'auv') {
-        setAuvList(auvList.filter((a: any) => a.id !== assetId));
-      } else if (category === 'vehicle') {
-        setVehicleList(vehicleList.filter((a: any) => a.id !== assetId));
-      } else {
-        setAccessoryList(accessoryList.filter((a: any) => a.id !== assetId));
+      try {
+        await deleteAsset({ variables: { id: assetId } });
+      } catch (err) {
+        console.error('Failed to delete asset:', err);
       }
     }
   };
@@ -411,7 +338,7 @@ export default function AssetManagement() {
                       </div>
                       <div>
                         <p className="text-muted-foreground text-xs">Flights</p>
-                        <p className="font-medium">{asset.totalFlights}</p>
+                        <p className="font-medium">{asset.totalOps || 0}</p>
                       </div>
                     </div>
 
@@ -487,11 +414,11 @@ export default function AssetManagement() {
                     <div className="grid grid-cols-2 gap-3 text-sm">
                       <div>
                         <p className="text-muted-foreground text-xs">Dive Hours</p>
-                        <p className="font-medium">{asset.diveHours}h</p>
+                        <p className="font-medium">{asset.flightHours || 0}h</p>
                       </div>
                       <div>
                         <p className="text-muted-foreground text-xs">Total Dives</p>
-                        <p className="font-medium">{asset.totalDives}</p>
+                        <p className="font-medium">{asset.totalOps || 0}</p>
                       </div>
                     </div>
 

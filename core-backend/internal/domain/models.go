@@ -25,6 +25,17 @@ type Asset struct {
 	Category    string    `gorm:"type:varchar(50);not null" json:"category"`
 	Status      string    `gorm:"type:varchar(20);default:'STANDBY'" json:"status"`
 	Battery     float64   `json:"battery"`
+	Serial      string    `gorm:"type:varchar(100)" json:"serial"`
+	Location    string    `gorm:"type:varchar(150)" json:"location"`
+	FlightHours float64   `json:"flightHours"`
+	TotalOps    int       `json:"totalOps"`
+	Plate       string    `gorm:"type:varchar(50)" json:"plate"`
+	Quantity    int       `json:"quantity"`
+	Fuel        float64   `json:"fuel"`
+	Mileage     float64   `json:"mileage"`
+	MaxDepth    float64   `json:"maxDepth"`
+	Capacity    string    `gorm:"type:varchar(50)" json:"capacity"`
+	Voltage     string    `gorm:"type:varchar(50)" json:"voltage"`
 	LastService time.Time `json:"lastService"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
