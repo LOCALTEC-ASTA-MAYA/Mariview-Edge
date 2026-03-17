@@ -6,11 +6,11 @@ services:
   locallitix-postgres:
     image: postgres:15-alpine
     environment:
-      POSTGRES_USER: root
-      POSTGRES_PASSWORD: supersecretpassword
+      POSTGRES_USER: ${DB_USER:-root}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-supersecretpassword}
       POSTGRES_MULTIPLE_DATABASES: locallitix_core,keycloak_db
     ports:
-      - "${PORT_POSTGRES:-5432}:5432" # <-- Port Fleksibel
+      - "${PORT_POSTGRES:-5432}:5432"
     volumes:
       - pg-data:/var/lib/postgresql/data
       - ./core-backend/scripts/init-multiple-psql-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-psql-dbs.sh
@@ -25,12 +25,12 @@ services:
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://locallitix-postgres:5432/keycloak_db
-      KC_DB_USERNAME: root
-      KC_DB_PASSWORD: supersecretpassword
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB_USERNAME: ${DB_USER:-root}
+      KC_DB_PASSWORD: ${DB_PASSWORD:-supersecretpassword}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
     ports:
-      - "${PORT_KEYCLOAK:-8081}:8080" # <-- Port Fleksibel
+      - "${PORT_KEYCLOAK:-8081}:8080"
     depends_on:
       - locallitix-postgres
     networks:
@@ -40,13 +40,13 @@ services:
     image: influxdb:2.7-alpine
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: admin
-      DOCKER_INFLUXDB_INIT_PASSWORD: supersecretpassword
-      DOCKER_INFLUXDB_INIT_ORG: locallitix
-      DOCKER_INFLUXDB_INIT_BUCKET: telemetry
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: locallitix-super-secret-token-123
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USER:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD:-supersecretpassword}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-locallitix}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-telemetry}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-locallitix-super-secret-token-123}
     ports:
-      - "${PORT_INFLUX:-8086}:8086" # <-- Port Fleksibel
+      - "${PORT_INFLUX:-8086}:8086"
     volumes:
       - influx-data:/var/lib/influxdb2
     networks:
@@ -56,7 +56,7 @@ services:
     image: nats:latest
     command: ["-js", "-sd", "/data"]
     ports:
-      - "${PORT_NATS:-4222}:4222" # <-- Port Fleksibel
+      - "${PORT_NATS:-4222}:4222"
       - "${PORT_NATS_MGT:-8222}:8222"
     volumes:
       - nats-data:/data
@@ -66,21 +66,21 @@ services:
   locallitix-video:
     image: bluenviron/mediamtx:latest
     ports:
-      - "${PORT_RTSP:-8554}:8554"   # <-- Port Fleksibel
-      - "${PORT_RTMP:-1935}:1935"   
-      - "${PORT_HLS:-8888}:8888"   
-      - "${PORT_MTX_API:-9997}:9997"   
+      - "${PORT_RTSP:-8554}:8554"
+      - "${PORT_RTMP:-1935}:1935"
+      - "${PORT_HLS:-8888}:8888"
+      - "${PORT_MTX_API:-9997}:9997"
     networks:
       - locallitix-net
 
   locallitix-minio:
     image: minio/minio:latest
     ports:
-      - "${PORT_MINIO:-9000}:9000" # <-- Port Fleksibel
+      - "${PORT_MINIO:-9000}:9000"
       - "${PORT_MINIO_UI:-9001}:9001"
     environment:
-      MINIO_ROOT_USER: komandan
-      MINIO_ROOT_PASSWORD: supersecretpassword
+      MINIO_ROOT_USER: ${MINIO_USER:-komandan}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-supersecretpassword}
     volumes:
       - minio-data:/data
     command: server /data --console-address ":9001"
@@ -103,30 +103,30 @@ services:
       - locallitix-keycloak
       - locallitix-minio
     environment:
-      - DB_DSN=host=locallitix-postgres user=root password=supersecretpassword dbname=locallitix_core port=5432 sslmode=disable
+      - DB_DSN=host=locallitix-postgres user=${DB_USER:-root} password=${DB_PASSWORD:-supersecretpassword} dbname=locallitix_core port=5432 sslmode=disable
       - INFLUX_URL=http://locallitix-influxdb:8086
-      - INFLUX_TOKEN=locallitix-super-secret-token-123
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-locallitix-super-secret-token-123}
       - NATS_URL=nats://locallitix-backbone:4222
       - KEYCLOAK_URL=http://locallitix-keycloak:8080/realms/locallitix/protocol/openid-connect/certs
       - KEYCLOAK_TOKEN_URL=http://locallitix-keycloak:8080/realms/locallitix/protocol/openid-connect/token
       - KEYCLOAK_ADMIN_URL=http://locallitix-keycloak:8080/admin/realms/locallitix
-      - KEYCLOAK_CLIENT_ID=chimp-platform
-      - KEYCLOAK_ADMIN_USER=admin
-      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-chimp-platform}
+      - KEYCLOAK_ADMIN_USER=${KEYCLOAK_ADMIN_USER:-admin}
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin}
       - MINIO_ENDPOINT=locallitix-minio:9000
-      - MINIO_ACCESS_KEY=komandan
-      - MINIO_SECRET_KEY=supersecretpassword
-      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-localhost}
+      - MINIO_ACCESS_KEY=${MINIO_USER:-komandan}
+      - MINIO_SECRET_KEY=${MINIO_PASSWORD:-supersecretpassword}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN-localhost}
       - COOKIE_SECURE=${COOKIE_SECURE:-false}
       - COOKIE_SAMESITE=${COOKIE_SAMESITE:-Lax}
       - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:${PORT_UI:-3000}}
-      - DRONE_MODE=${DRONE_MODE:-virtual}                
-      - DISABLE_DRONE_SIM=${DISABLE_DRONE_SIM:-false}   
+      - DRONE_MODE=${DRONE_MODE:-virtual}
+      - DISABLE_DRONE_SIM=${DISABLE_DRONE_SIM:-false}
     ports:
-      - "${PORT_CORE:-8080}:8080" # <-- Port Fleksibel
+      - "${PORT_CORE:-8080}:8080"
     volumes:
       - ./mariview-frontend/public/assets/drone.mp4:/app/drone.mp4:ro
-      - recordings-data:/recordings   
+      - recordings-data:/recordings
     restart: unless-stopped
     dns:
       - 8.8.8.8
@@ -141,7 +141,7 @@ services:
     depends_on:
       - locallitix-core-api
     ports:
-      - "${PORT_UI:-3000}:80" # <-- Port Fleksibel
+      - "${PORT_UI:-3000}:80"
     restart: unless-stopped
     networks:
       - locallitix-net
@@ -161,8 +161,8 @@ services:
       - .env
     volumes:
       - ./mariview-frontend/public/assets/drone.mp4:/app/videos/drone.mp4:ro
-      - recordings-data:/recordings   
-      - hf-cache:/root/.cache/huggingface  
+      - recordings-data:/recordings
+      - hf-cache:/root/.cache/huggingface
     environment:
       - NATS_URL=nats://locallitix-backbone:4222
       - MEDIAMTX_RTSP_URL=rtsp://locallitix-video:8554/drone-cam
@@ -185,10 +185,10 @@ services:
     environment:
       - NATS_URL=nats://locallitix-backbone:4222
     ports:
-      - "${PORT_MAVLINK:-14550}:14550/udp" # <-- Port Fleksibel
+      - "${PORT_MAVLINK:-14550}:14550/udp"
     restart: unless-stopped
     profiles:
-      - real                 
+      - real
     networks:
       - locallitix-net
 
@@ -201,5 +201,5 @@ volumes:
   pg-data:
   influx-data:
   minio-data:
-  recordings-data:  
+  recordings-data:
   hf-cache:
