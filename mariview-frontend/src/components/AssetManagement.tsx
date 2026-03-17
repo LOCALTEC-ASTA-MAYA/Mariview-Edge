@@ -6,38 +6,109 @@ import { Badge } from './ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
-import { Search, Battery, Calendar, Clock, Wrench, Plane, Ship, Car, Package, Plus, Edit, Trash2, Eye, Loader2 } from 'lucide-react';
+import { Search, Battery, Calendar, Clock, Wrench, Plane, Ship, Car, Package, Plus, Edit, Trash2, Eye, Loader2, AlertTriangle } from 'lucide-react';
 import { Progress } from './ui/progress';
 import { Label } from './ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { useQuery, useMutation } from '@apollo/client';
 import { GET_ASSETS, CREATE_ASSET, UPDATE_ASSET, DELETE_ASSET } from '../graphql/queries';
 
+// ─── Helpers ────────────────────────────────────────────
 const getStatusColor = (status: string) => {
-  switch (status.toLowerCase()) {
+  switch ((status || '').toLowerCase()) {
     case 'available':
     case 'standby': return '#22c55e';
     case 'in-flight':
-    case 'in-use': return '#21A68D';
-    case 'maintenance': return '#D4E268';
-    case 'charging': return '#3b82f6';
+    case 'in_flight':
+    case 'active': return '#21A68D';
+    case 'in-use':
+    case 'in_use': return '#3b82f6';
+    case 'maintenance': return '#f59e0b';
+    case 'charging': return '#6366f1';
     default: return '#6b7280';
   }
 };
 
 const getBatteryColor = (battery: number) => {
   if (battery >= 80) return '#22c55e';
-  if (battery >= 50) return '#D4E268';
+  if (battery >= 50) return '#f59e0b';
   return '#ef4444';
 };
 
+const statusLabel = (s: string) => {
+  switch ((s || '').toUpperCase()) {
+    case 'STANDBY': return 'Standby';
+    case 'ACTIVE': return 'Active';
+    case 'IN_FLIGHT': return 'In-Flight';
+    case 'IN_USE': return 'In-Use';
+    case 'MAINTENANCE': return 'Maintenance';
+    case 'CHARGING': return 'Charging';
+    default: return s;
+  }
+};
+
+// Type options per category
+const typeOptions: Record<string, { value: string; label: string }[]> = {
+  UAV: [
+    { value: 'Aerial Quadcopter', label: 'Aerial Quadcopter' },
+    { value: 'Tactical Drone', label: 'Tactical Drone' },
+    { value: 'High Altitude', label: 'High Altitude' },
+    { value: 'Fixed Wing', label: 'Fixed Wing' },
+    { value: 'Racing Drone', label: 'Racing Drone' },
+    { value: 'Hexacopter', label: 'Hexacopter' },
+  ],
+  AUV: [
+    { value: 'Survey AUV', label: 'Survey AUV' },
+    { value: 'Deep Sea AUV', label: 'Deep Sea AUV' },
+    { value: 'Research AUV', label: 'Research AUV' },
+    { value: 'Inspection ROV', label: 'Inspection ROV' },
+    { value: 'Mine Countermeasure', label: 'Mine Countermeasure' },
+  ],
+  VEHICLE: [
+    { value: 'Command Vehicle', label: 'Command Vehicle' },
+    { value: 'Support Vehicle', label: 'Support Vehicle' },
+    { value: 'Cargo Van', label: 'Cargo Van' },
+    { value: 'Patrol Vehicle', label: 'Patrol Vehicle' },
+    { value: 'Transport Bus', label: 'Transport Bus' },
+  ],
+  ACCESSORY: [
+    { value: 'Battery', label: 'Battery' },
+    { value: 'Camera', label: 'Camera' },
+    { value: 'Propeller', label: 'Propeller' },
+    { value: 'Sensor', label: 'Sensor' },
+    { value: 'Charger', label: 'Charger' },
+    { value: 'Controller', label: 'Controller' },
+    { value: 'Antenna', label: 'Antenna' },
+    { value: 'GPS Module', label: 'GPS Module' },
+  ],
+};
+
+const statusOptions = [
+  { value: 'STANDBY', label: 'Standby' },
+  { value: 'ACTIVE', label: 'Active' },
+  { value: 'IN_FLIGHT', label: 'In-Flight' },
+  { value: 'IN_USE', label: 'In-Use' },
+  { value: 'MAINTENANCE', label: 'Maintenance' },
+  { value: 'CHARGING', label: 'Charging' },
+];
+
+const defaultForm = {
+  name: '', type: '', status: 'STANDBY', battery: 100,
+  location: '', serial: '', maxDepth: 0, plate: '',
+  fuel: 100, mileage: 0, quantity: 1, capacity: '', voltage: '',
+};
+
+// ─── Component ──────────────────────────────────────────
 export default function AssetManagement() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAsset, setSelectedAsset] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('uav');
 
-  // GraphQL: fetch ALL assets from database
-  const { data, loading, refetch } = useQuery(GET_ASSETS);
+  // GraphQL — fetch ALL assets from database
+  const { data, loading, error, refetch } = useQuery(GET_ASSETS, {
+    fetchPolicy: 'network-only',
+    onError: (err) => console.error('[AssetMgmt] GraphQL error:', err),
+  });
   const allAssets: any[] = data?.getAssets || [];
 
   // Filter by category
@@ -47,66 +118,58 @@ export default function AssetManagement() {
   const accessoryList = useMemo(() => allAssets.filter((a: any) => a.category === 'ACCESSORY'), [allAssets]);
 
   // GraphQL Mutations
-  const [createAsset] = useMutation(CREATE_ASSET, { onCompleted: () => refetch() });
-  const [updateAsset] = useMutation(UPDATE_ASSET, { onCompleted: () => refetch() });
-  const [deleteAsset] = useMutation(DELETE_ASSET, { onCompleted: () => refetch() });
+  const [createAsset, { loading: creating }] = useMutation(CREATE_ASSET, {
+    onCompleted: () => refetch(),
+    onError: (err) => console.error('[AssetMgmt] Create failed:', err),
+  });
+  const [updateAsset, { loading: updating }] = useMutation(UPDATE_ASSET, {
+    onCompleted: () => refetch(),
+    onError: (err) => console.error('[AssetMgmt] Update failed:', err),
+  });
+  const [deleteAsset] = useMutation(DELETE_ASSET, {
+    onCompleted: () => refetch(),
+    onError: (err) => console.error('[AssetMgmt] Delete failed:', err),
+  });
 
   const [isAddUavOpen, setIsAddUavOpen] = useState(false);
   const [isAddAuvOpen, setIsAddAuvOpen] = useState(false);
   const [isAddVehicleOpen, setIsAddVehicleOpen] = useState(false);
   const [isAddAccessoryOpen, setIsAddAccessoryOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
-  const [currentCategory, setCurrentCategory] = useState('uav');
+  const [currentCategory, setCurrentCategory] = useState('UAV');
   const [editingAsset, setEditingAsset] = useState<any>(null);
-  const [assetForm, setAssetForm] = useState({
-    name: '',
-    type: '',
-    status: 'available',
-    battery: 100,
-    location: '',
-    serial: '',
-    maxDepth: 0,
-    plate: '',
-    fuel: 100,
-    mileage: 0,
-    quantity: 1,
-    capacity: '',
-    voltage: '',
-  });
+  const [assetForm, setAssetForm] = useState({ ...defaultForm });
 
-  // CRUD Functions — all go to database via GraphQL
+  // ─── CRUD ─────────────────────────────────────────────
   const handleAddAsset = async (category: string) => {
     const catMap: Record<string, string> = {
       uav: 'UAV', auv: 'AUV', vehicles: 'VEHICLE', accessories: 'ACCESSORY',
     };
+    const cat = catMap[category] || category.toUpperCase();
 
     const input: any = {
       name: assetForm.name,
       type: assetForm.type,
-      category: catMap[category] || category.toUpperCase(),
+      category: cat,
       status: assetForm.status || 'STANDBY',
-      location: assetForm.location,
+      location: assetForm.location || '',
     };
 
-    if (category === 'uav') {
+    if (cat === 'UAV') {
       input.battery = assetForm.battery;
       input.serial = assetForm.serial;
-      setIsAddUavOpen(false);
-    } else if (category === 'auv') {
+    } else if (cat === 'AUV') {
       input.battery = assetForm.battery;
       input.serial = assetForm.serial;
       input.maxDepth = assetForm.maxDepth;
-      setIsAddAuvOpen(false);
-    } else if (category === 'vehicles') {
+    } else if (cat === 'VEHICLE') {
       input.fuel = assetForm.fuel;
       input.mileage = assetForm.mileage;
       input.plate = assetForm.plate;
-      setIsAddVehicleOpen(false);
-    } else if (category === 'accessories') {
+    } else if (cat === 'ACCESSORY') {
       input.quantity = assetForm.quantity;
       input.capacity = assetForm.capacity;
       input.voltage = assetForm.voltage;
-      setIsAddAccessoryOpen(false);
     }
 
     try {
@@ -114,6 +177,12 @@ export default function AssetManagement() {
     } catch (err) {
       console.error('Failed to create asset:', err);
     }
+
+    // Close dialogs
+    setIsAddUavOpen(false);
+    setIsAddAuvOpen(false);
+    setIsAddVehicleOpen(false);
+    setIsAddAccessoryOpen(false);
     resetForm();
   };
 
@@ -147,7 +216,7 @@ export default function AssetManagement() {
     resetForm();
   };
 
-  const handleDeleteAsset = async (assetId: string, _category: string) => {
+  const handleDeleteAsset = async (assetId: string) => {
     if (confirm('Are you sure you want to delete this asset?')) {
       try {
         await deleteAsset({ variables: { id: assetId } });
@@ -157,45 +226,58 @@ export default function AssetManagement() {
     }
   };
 
-  const openEditDialog = (asset: any, category: string) => {
+  const openEditDialog = (asset: any) => {
     setEditingAsset(asset);
-    setCurrentCategory(category);
+    setCurrentCategory(asset.category || 'UAV');
     setAssetForm({
-      name: asset.name,
-      type: asset.type,
-      status: asset.status,
-      battery: asset.battery || 100,
-      location: asset.location,
+      name: asset.name || '',
+      type: asset.type || '',
+      status: asset.status || 'STANDBY',
+      battery: asset.battery ?? 100,
+      location: asset.location || '',
       serial: asset.serial || '',
-      maxDepth: asset.maxDepth || 0,
+      maxDepth: asset.maxDepth ?? 0,
       plate: asset.plate || '',
-      fuel: asset.fuel || 100,
-      mileage: asset.mileage || 0,
-      quantity: asset.quantity || 1,
+      fuel: asset.fuel ?? 100,
+      mileage: asset.mileage ?? 0,
+      quantity: asset.quantity ?? 1,
       capacity: asset.capacity || '',
       voltage: asset.voltage || '',
     });
     setIsEditDialogOpen(true);
   };
 
-  const resetForm = () => {
-    setAssetForm({
-      name: '',
-      type: '',
-      status: 'available',
-      battery: 100,
-      location: '',
-      serial: '',
-      maxDepth: 0,
-      plate: '',
-      fuel: 100,
-      mileage: 0,
-      quantity: 1,
-      capacity: '',
-      voltage: '',
-    });
+  const openAddDialog = (category: string) => {
+    const defaults: Record<string, Partial<typeof defaultForm>> = {
+      UAV: { type: 'Aerial Quadcopter', battery: 100 },
+      AUV: { type: 'Survey AUV', battery: 100, maxDepth: 500 },
+      VEHICLE: { type: 'Support Vehicle', fuel: 100 },
+      ACCESSORY: { type: 'Battery', quantity: 1 },
+    };
+    const catMap: Record<string, string> = { uav: 'UAV', auv: 'AUV', vehicles: 'VEHICLE', accessories: 'ACCESSORY' };
+    const cat = catMap[category] || category;
+    resetForm();
+    setAssetForm(f => ({ ...f, ...defaults[cat] }));
+    setCurrentCategory(cat);
+    if (cat === 'UAV') setIsAddUavOpen(true);
+    else if (cat === 'AUV') setIsAddAuvOpen(true);
+    else if (cat === 'VEHICLE') setIsAddVehicleOpen(true);
+    else setIsAddAccessoryOpen(true);
   };
 
+  const resetForm = () => setAssetForm({ ...defaultForm });
+
+  // Search helper — safe for null values
+  const matchesSearch = (asset: any) => {
+    if (!searchQuery) return true;
+    const q = searchQuery.toLowerCase();
+    return (asset.name || '').toLowerCase().includes(q)
+      || (asset.type || '').toLowerCase().includes(q)
+      || (asset.serial || '').toLowerCase().includes(q)
+      || (asset.id || '').toLowerCase().includes(q);
+  };
+
+  // ─── Render ───────────────────────────────────────────
   return (
     <div className="p-4 md:p-6">
       {/* Header */}
@@ -255,70 +337,86 @@ export default function AssetManagement() {
         </Card>
       </div>
 
-      {/* Tabs for Asset Categories */}
-      <div className="flex justify-end mb-2">
+      {/* Search + Add Button */}
+      <div className="flex gap-3 mb-3">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Input
+            type="text"
+            placeholder="Search assets..."
+            className="pl-10 bg-input"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
         {activeTab === 'uav' && (
-          <Button className="bg-[#21A68D] hover:bg-[#1a8a72] text-white" onClick={() => { setCurrentCategory('uav'); resetForm(); setIsAddUavOpen(true); }}>
+          <Button className="bg-[#21A68D] hover:bg-[#1a8a72] text-white" onClick={() => openAddDialog('uav')}>
             <Plus className="w-4 h-4 mr-2" /> Add UAV
           </Button>
         )}
         {activeTab === 'auv' && (
-          <Button className="bg-[#0F4C75] hover:bg-[#0b3a5a] text-white" onClick={() => { setCurrentCategory('auv'); resetForm(); setIsAddAuvOpen(true); }}>
+          <Button className="bg-[#0F4C75] hover:bg-[#0b3a5a] text-white" onClick={() => openAddDialog('auv')}>
             <Plus className="w-4 h-4 mr-2" /> Add AUV
           </Button>
         )}
         {activeTab === 'vehicles' && (
-          <Button style={{ backgroundColor: '#D4E268', color: '#000000' }} className="hover:opacity-90 font-semibold" onClick={() => { setCurrentCategory('vehicles'); resetForm(); setIsAddVehicleOpen(true); }}>
+          <Button style={{ backgroundColor: '#D4E268', color: '#000000' }} className="hover:opacity-90 font-semibold" onClick={() => openAddDialog('vehicles')}>
             <Plus className="w-4 h-4 mr-2" /> Add Vehicle
           </Button>
         )}
         {activeTab === 'accessories' && (
-          <Button style={{ backgroundColor: '#8b5cf6', color: '#ffffff' }} className="hover:opacity-90" onClick={() => { setCurrentCategory('accessories'); resetForm(); setIsAddAccessoryOpen(true); }}>
+          <Button style={{ backgroundColor: '#8b5cf6', color: '#ffffff' }} className="hover:opacity-90" onClick={() => openAddDialog('accessories')}>
             <Plus className="w-4 h-4 mr-2" /> Add Accessory
           </Button>
         )}
       </div>
+
+      {/* Loading / Error States */}
+      {loading && (
+        <div className="flex items-center justify-center py-12 gap-3 text-muted-foreground">
+          <Loader2 className="w-5 h-5 animate-spin" /> Loading assets...
+        </div>
+      )}
+      {error && (
+        <div className="flex items-center justify-center py-12 gap-3 text-red-400">
+          <AlertTriangle className="w-5 h-5" /> Failed to load assets. <Button variant="outline" size="sm" onClick={() => refetch()}>Retry</Button>
+        </div>
+      )}
+
+      {!loading && !error && (
       <Tabs defaultValue="uav" className="w-full">
         <TabsList className="grid w-full grid-cols-4 mb-3">
           <TabsTrigger value="uav" className="data-[state=active]:bg-[#21A68D]" onClick={() => setActiveTab('uav')}>
             <Plane className="w-4 h-4 mr-2" />
-            UAV
+            UAV ({uavList.length})
           </TabsTrigger>
           <TabsTrigger value="auv" className="data-[state=active]:bg-[#0F4C75]" onClick={() => setActiveTab('auv')}>
             <Ship className="w-4 h-4 mr-2" />
-            AUV
+            AUV ({auvList.length})
           </TabsTrigger>
           <TabsTrigger value="vehicles" className="data-[state=active]:bg-[#D4E268]" onClick={() => setActiveTab('vehicles')}>
             <Car className="w-4 h-4 mr-2" />
-            Vehicles
+            Vehicles ({vehicleList.length})
           </TabsTrigger>
           <TabsTrigger value="accessories" className="data-[state=active]:bg-[#8b5cf6]" onClick={() => setActiveTab('accessories')}>
             <Package className="w-4 h-4 mr-2" />
-            Accessories
+            Accessories ({accessoryList.length})
           </TabsTrigger>
         </TabsList>
 
         {/* UAV Tab */}
         <TabsContent value="uav">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {uavList
-              .filter((asset: any) =>
-                asset.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                asset.name.toLowerCase().includes(searchQuery.toLowerCase())
-              )
-              .map((asset: any) => (
+            {uavList.filter(matchesSearch).map((asset: any) => (
                 <Card key={asset.id} className="p-5 bg-card border-border hover:border-[#21A68D] transition-all">
                   <div className="flex justify-between items-start mb-4">
                     <div>
                       <h3 className="font-medium mb-1">{asset.name}</h3>
                       <p className="text-xs text-muted-foreground">{asset.type}</p>
-                      <p className="text-xs text-muted-foreground mt-1">{asset.id}</p>
+                      {asset.serial && <p className="text-xs text-muted-foreground mt-1">S/N: {asset.serial}</p>}
                     </div>
-                    <Badge
-                      variant="outline"
-                      style={{ borderColor: getStatusColor(asset.status), color: getStatusColor(asset.status) }}
-                    >
-                      {asset.status}
+                    <Badge variant="outline" style={{ borderColor: getStatusColor(asset.status), color: getStatusColor(asset.status) }}>
+                      {statusLabel(asset.status)}
                     </Badge>
                   </div>
 
@@ -326,50 +424,35 @@ export default function AssetManagement() {
                     <div>
                       <div className="flex justify-between text-sm mb-1">
                         <span className="text-muted-foreground">Battery</span>
-                        <span style={{ color: getBatteryColor(asset.battery) }}>{asset.battery}%</span>
+                        <span style={{ color: getBatteryColor(asset.battery || 0) }}>{asset.battery || 0}%</span>
                       </div>
-                      <Progress value={asset.battery} className="h-2" />
+                      <Progress value={asset.battery || 0} className="h-2" />
                     </div>
 
                     <div className="grid grid-cols-2 gap-3 text-sm">
                       <div>
                         <p className="text-muted-foreground text-xs">Flight Hours</p>
-                        <p className="font-medium">{asset.flightHours}h</p>
+                        <p className="font-medium">{asset.flightHours || 0}h</p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground text-xs">Flights</p>
+                        <p className="text-muted-foreground text-xs">Total Ops</p>
                         <p className="font-medium">{asset.totalOps || 0}</p>
                       </div>
                     </div>
 
                     <div className="text-xs">
-                      <p className="text-muted-foreground">Location: {asset.location}</p>
+                      <p className="text-muted-foreground">Location: {asset.location || '—'}</p>
                     </div>
                   </div>
 
                   <div className="flex gap-2 mt-4">
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => setSelectedAsset({ ...asset, category: 'uav' })}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1" onClick={() => setSelectedAsset(asset)}>
                       <Eye className="w-4 h-4" />
                     </Button>
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => openEditDialog(asset, 'uav')}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1" onClick={() => openEditDialog(asset)}>
                       <Edit className="w-4 h-4" />
                     </Button>
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1 border-red-500 text-red-500 hover:bg-red-500 hover:text-white"
-                      onClick={() => handleDeleteAsset(asset.id, 'uav')}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1 border-red-500 text-red-500 hover:bg-red-500 hover:text-white" onClick={() => handleDeleteAsset(asset.id)}>
                       <Trash2 className="w-4 h-4" />
                     </Button>
                   </div>
@@ -381,24 +464,16 @@ export default function AssetManagement() {
         {/* AUV Tab */}
         <TabsContent value="auv">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {auvList
-              .filter((asset: any) =>
-                asset.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                asset.name.toLowerCase().includes(searchQuery.toLowerCase())
-              )
-              .map((asset: any) => (
+            {auvList.filter(matchesSearch).map((asset: any) => (
                 <Card key={asset.id} className="p-5 bg-card border-border hover:border-[#0F4C75] transition-all">
                   <div className="flex justify-between items-start mb-4">
                     <div>
                       <h3 className="font-medium mb-1">{asset.name}</h3>
                       <p className="text-xs text-muted-foreground">{asset.type}</p>
-                      <p className="text-xs text-muted-foreground mt-1">{asset.id}</p>
+                      {asset.serial && <p className="text-xs text-muted-foreground mt-1">S/N: {asset.serial}</p>}
                     </div>
-                    <Badge
-                      variant="outline"
-                      style={{ borderColor: getStatusColor(asset.status), color: getStatusColor(asset.status) }}
-                    >
-                      {asset.status}
+                    <Badge variant="outline" style={{ borderColor: getStatusColor(asset.status), color: getStatusColor(asset.status) }}>
+                      {statusLabel(asset.status)}
                     </Badge>
                   </div>
 
@@ -406,9 +481,9 @@ export default function AssetManagement() {
                     <div>
                       <div className="flex justify-between text-sm mb-1">
                         <span className="text-muted-foreground">Battery</span>
-                        <span style={{ color: getBatteryColor(asset.battery) }}>{asset.battery}%</span>
+                        <span style={{ color: getBatteryColor(asset.battery || 0) }}>{asset.battery || 0}%</span>
                       </div>
-                      <Progress value={asset.battery} className="h-2" />
+                      <Progress value={asset.battery || 0} className="h-2" />
                     </div>
 
                     <div className="grid grid-cols-2 gap-3 text-sm">
@@ -417,40 +492,24 @@ export default function AssetManagement() {
                         <p className="font-medium">{asset.flightHours || 0}h</p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground text-xs">Total Dives</p>
-                        <p className="font-medium">{asset.totalOps || 0}</p>
+                        <p className="text-muted-foreground text-xs">Max Depth</p>
+                        <p className="font-medium">{asset.maxDepth || 0}m</p>
                       </div>
                     </div>
 
                     <div className="text-xs">
-                      <p className="text-muted-foreground">Max Depth: {asset.maxDepth}m</p>
-                      <p className="text-muted-foreground">Location: {asset.location}</p>
+                      <p className="text-muted-foreground">Location: {asset.location || '—'}</p>
                     </div>
                   </div>
 
                   <div className="flex gap-2 mt-4">
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => setSelectedAsset({ ...asset, category: 'auv' })}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1" onClick={() => setSelectedAsset(asset)}>
                       <Eye className="w-4 h-4" />
                     </Button>
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => openEditDialog(asset, 'auv')}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1" onClick={() => openEditDialog(asset)}>
                       <Edit className="w-4 h-4" />
                     </Button>
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1 border-red-500 text-red-500 hover:bg-red-500 hover:text-white"
-                      onClick={() => handleDeleteAsset(asset.id, 'auv')}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1 border-red-500 text-red-500 hover:bg-red-500 hover:text-white" onClick={() => handleDeleteAsset(asset.id)}>
                       <Trash2 className="w-4 h-4" />
                     </Button>
                   </div>
@@ -462,71 +521,48 @@ export default function AssetManagement() {
         {/* Vehicles Tab */}
         <TabsContent value="vehicles">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {vehicleList
-              .filter((asset: any) =>
-                asset.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                asset.name.toLowerCase().includes(searchQuery.toLowerCase())
-              )
-              .map((asset: any) => (
+            {vehicleList.filter(matchesSearch).map((asset: any) => (
                 <Card key={asset.id} className="p-5 bg-card border-border hover:border-[#D4E268] transition-all">
                   <div className="flex justify-between items-start mb-4">
                     <div>
                       <h3 className="font-medium mb-1">{asset.name}</h3>
                       <p className="text-xs text-muted-foreground">{asset.type}</p>
-                      <p className="text-xs text-muted-foreground mt-1">{asset.plate}</p>
+                      {asset.plate && <p className="text-xs text-muted-foreground mt-1">Plate: {asset.plate}</p>}
                     </div>
-                    <Badge
-                      variant="outline"
-                      style={{ borderColor: getStatusColor(asset.status), color: getStatusColor(asset.status) }}
-                    >
-                      {asset.status}
+                    <Badge variant="outline" style={{ borderColor: getStatusColor(asset.status), color: getStatusColor(asset.status) }}>
+                      {statusLabel(asset.status)}
                     </Badge>
                   </div>
 
                   <div className="space-y-3">
                     <div>
                       <div className="flex justify-between text-sm mb-1">
-                        <span className="text-muted-foreground">Fuel Level</span>
-                        <span style={{ color: getBatteryColor(asset.fuel) }}>{asset.fuel}%</span>
+                        <span className="text-muted-foreground">Fuel</span>
+                        <span style={{ color: getBatteryColor(asset.fuel || 0) }}>{asset.fuel || 0}%</span>
                       </div>
-                      <Progress value={asset.fuel} className="h-2" />
+                      <Progress value={asset.fuel || 0} className="h-2" />
                     </div>
 
-                    <div className="text-sm">
-                      <div className="flex justify-between mb-1">
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div>
                         <p className="text-muted-foreground text-xs">Mileage</p>
-                        <p className="font-medium">{asset.mileage.toLocaleString()} km</p>
+                        <p className="font-medium">{(asset.mileage || 0).toLocaleString()} km</p>
                       </div>
-                    </div>
-
-                    <div className="text-xs">
-                      <p className="text-muted-foreground">Location: {asset.location}</p>
+                      <div>
+                        <p className="text-muted-foreground text-xs">Location</p>
+                        <p className="font-medium">{asset.location || '—'}</p>
+                      </div>
                     </div>
                   </div>
 
                   <div className="flex gap-2 mt-4">
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => setSelectedAsset({ ...asset, category: 'vehicle' })}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1" onClick={() => setSelectedAsset(asset)}>
                       <Eye className="w-4 h-4" />
                     </Button>
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => openEditDialog(asset, 'vehicles')}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1" onClick={() => openEditDialog(asset)}>
                       <Edit className="w-4 h-4" />
                     </Button>
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1 border-red-500 text-red-500 hover:bg-red-500 hover:text-white"
-                      onClick={() => handleDeleteAsset(asset.id, 'vehicle')}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1 border-red-500 text-red-500 hover:bg-red-500 hover:text-white" onClick={() => handleDeleteAsset(asset.id)}>
                       <Trash2 className="w-4 h-4" />
                     </Button>
                   </div>
@@ -538,89 +574,44 @@ export default function AssetManagement() {
         {/* Accessories Tab */}
         <TabsContent value="accessories">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {accessoryList
-              .filter((asset: any) =>
-                asset.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                asset.name.toLowerCase().includes(searchQuery.toLowerCase())
-              )
-              .map((asset: any) => (
+            {accessoryList.filter(matchesSearch).map((asset: any) => (
                 <Card key={asset.id} className="p-5 bg-card border-border hover:border-[#8b5cf6] transition-all">
                   <div className="flex justify-between items-start mb-4">
                     <div>
                       <h3 className="font-medium mb-1">{asset.name}</h3>
                       <p className="text-xs text-muted-foreground">{asset.type}</p>
-                      <p className="text-xs text-muted-foreground mt-1">{asset.id}</p>
                     </div>
-                    <Badge
-                      variant="outline"
-                      style={{ borderColor: getStatusColor(asset.status), color: getStatusColor(asset.status) }}
-                    >
-                      Stock: {asset.quantity}
+                    <Badge variant="outline" style={{ borderColor: getStatusColor(asset.status), color: getStatusColor(asset.status) }}>
+                      {statusLabel(asset.status)}
                     </Badge>
                   </div>
 
-                  <div className="space-y-2 text-sm">
-                    {asset.capacity && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Capacity:</span>
-                        <span>{asset.capacity}</span>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div>
+                        <p className="text-muted-foreground text-xs">Quantity</p>
+                        <p className="font-medium text-lg">{asset.quantity || 0} pcs</p>
                       </div>
-                    )}
+                      <div>
+                        <p className="text-muted-foreground text-xs">Capacity</p>
+                        <p className="font-medium">{asset.capacity || '—'}</p>
+                      </div>
+                    </div>
                     {asset.voltage && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Voltage:</span>
-                        <span>{asset.voltage}</span>
-                      </div>
-                    )}
-                    {asset.cycles && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Avg Cycles:</span>
-                        <span>{asset.cycles}</span>
-                      </div>
-                    )}
-                    {asset.resolution && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Resolution:</span>
-                        <span>{asset.resolution}</span>
-                      </div>
-                    )}
-                    {asset.size && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Size:</span>
-                        <span>{asset.size}</span>
-                      </div>
-                    )}
-                    {asset.output && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Output:</span>
-                        <span>{asset.output}</span>
+                      <div className="text-xs">
+                        <p className="text-muted-foreground">Voltage / Info: {asset.voltage}</p>
                       </div>
                     )}
                   </div>
 
                   <div className="flex gap-2 mt-4">
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => setSelectedAsset({ ...asset, category: 'accessory' })}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1" onClick={() => setSelectedAsset(asset)}>
                       <Eye className="w-4 h-4" />
                     </Button>
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => openEditDialog(asset, 'accessories')}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1" onClick={() => openEditDialog(asset)}>
                       <Edit className="w-4 h-4" />
                     </Button>
-                    <Button
-                      size="icon"
-                      variant="outline"
-                      className="flex-1 border-red-500 text-red-500 hover:bg-red-500 hover:text-white"
-                      onClick={() => handleDeleteAsset(asset.id, 'accessory')}
-                    >
+                    <Button size="icon" variant="outline" className="flex-1 border-red-500 text-red-500 hover:bg-red-500 hover:text-white" onClick={() => handleDeleteAsset(asset.id)}>
                       <Trash2 className="w-4 h-4" />
                     </Button>
                   </div>
@@ -629,167 +620,82 @@ export default function AssetManagement() {
           </div>
         </TabsContent>
       </Tabs>
+      )}
 
       {/* Detail Sheet */}
-      <Sheet open={!!selectedAsset} onOpenChange={() => setSelectedAsset(null)}>
-        <SheetContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto">
+      <Sheet open={!!selectedAsset} onOpenChange={(open) => !open && setSelectedAsset(null)}>
+        <SheetContent className="w-full sm:w-[450px] overflow-y-auto">
+          <SheetHeader>
+            <SheetTitle>Asset Details</SheetTitle>
+            <SheetDescription>View detailed information about this asset.</SheetDescription>
+          </SheetHeader>
           {selectedAsset && (
-            <>
-              <SheetHeader>
-                <SheetTitle className="flex items-center gap-3">
-                  <span style={{ color: '#21A68D' }}>{selectedAsset.name}</span>
-                  <Badge variant="outline" style={{ borderColor: getStatusColor(selectedAsset.status), color: getStatusColor(selectedAsset.status) }}>
-                    {selectedAsset.status}
-                  </Badge>
-                </SheetTitle>
-                <SheetDescription>
-                  {selectedAsset.type} - {selectedAsset.id}
-                </SheetDescription>
-              </SheetHeader>
+            <div className="mt-6 space-y-4">
+              <Card className="p-4 bg-muted/30">
+                <h3 className="font-medium text-lg">{selectedAsset.name}</h3>
+                <p className="text-sm text-muted-foreground">{selectedAsset.type}</p>
+                <Badge variant="outline" className="mt-2" style={{ borderColor: getStatusColor(selectedAsset.status), color: getStatusColor(selectedAsset.status) }}>
+                  {statusLabel(selectedAsset.status)}
+                </Badge>
+              </Card>
 
-              <div className="mt-6 space-y-6">
-                {/* Specifications */}
-                <Card className="p-4 bg-muted/30">
-                  <h3 className="text-sm mb-3" style={{ color: '#21A68D' }}>Specifications</h3>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">ID:</span>
-                      <span>{selectedAsset.id}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Name:</span>
-                      <span>{selectedAsset.name}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Type:</span>
-                      <span>{selectedAsset.type}</span>
-                    </div>
-                    {selectedAsset.serial && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Serial:</span>
-                        <span>{selectedAsset.serial}</span>
-                      </div>
-                    )}
-                    {selectedAsset.plate && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Plate Number:</span>
-                        <span>{selectedAsset.plate}</span>
-                      </div>
-                    )}
-                    {selectedAsset.quantity !== undefined && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Quantity:</span>
-                        <span>{selectedAsset.quantity} units</span>
-                      </div>
-                    )}
-                  </div>
-                </Card>
-
-                {/* Performance Metrics */}
-                {(selectedAsset.battery !== undefined || selectedAsset.fuel !== undefined) && (
-                  <Card className="p-4 bg-muted/30">
-                    <h3 className="text-sm mb-3" style={{ color: '#0F4C75' }}>Performance Metrics</h3>
-                    <div className="space-y-4">
-                      {selectedAsset.battery !== undefined && (
-                        <div>
-                          <div className="flex justify-between text-sm mb-2">
-                            <span className="text-muted-foreground">Battery Level</span>
-                            <span style={{ color: getBatteryColor(selectedAsset.battery) }}>{selectedAsset.battery}%</span>
-                          </div>
-                          <Progress value={selectedAsset.battery} className="h-2" />
-                        </div>
-                      )}
-                      {selectedAsset.fuel !== undefined && (
-                        <div>
-                          <div className="flex justify-between text-sm mb-2">
-                            <span className="text-muted-foreground">Fuel Level</span>
-                            <span style={{ color: getBatteryColor(selectedAsset.fuel) }}>{selectedAsset.fuel}%</span>
-                          </div>
-                          <Progress value={selectedAsset.fuel} className="h-2" />
-                        </div>
-                      )}
-                      {selectedAsset.flightHours !== undefined && (
-                        <div>
-                          <div className="flex justify-between text-sm mb-2">
-                            <span className="text-muted-foreground">Total Flight Hours</span>
-                            <span>{selectedAsset.flightHours}h</span>
-                          </div>
-                        </div>
-                      )}
-                      {selectedAsset.diveHours !== undefined && (
-                        <div>
-                          <div className="flex justify-between text-sm mb-2">
-                            <span className="text-muted-foreground">Total Dive Hours</span>
-                            <span>{selectedAsset.diveHours}h</span>
-                          </div>
-                        </div>
-                      )}
-                      {selectedAsset.mileage !== undefined && (
-                        <div>
-                          <div className="flex justify-between text-sm mb-2">
-                            <span className="text-muted-foreground">Mileage</span>
-                            <span>{selectedAsset.mileage.toLocaleString()} km</span>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </Card>
-                )}
-
-                {/* Additional Info */}
-                <Card className="p-4 bg-muted/30">
-                  <h3 className="text-sm mb-3">Additional Information</h3>
-                  <div className="space-y-2 text-sm">
-                    {selectedAsset.maxDepth && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Max Depth:</span>
-                        <span>{selectedAsset.maxDepth}m</span>
-                      </div>
-                    )}
-                    {selectedAsset.capacity && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Capacity:</span>
-                        <span>{selectedAsset.capacity}</span>
-                      </div>
-                    )}
-                    {selectedAsset.resolution && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Resolution:</span>
-                        <span>{selectedAsset.resolution}</span>
-                      </div>
-                    )}
-                    {selectedAsset.material && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Material:</span>
-                        <span>{selectedAsset.material}</span>
-                      </div>
-                    )}
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Location:</span>
-                      <span>{selectedAsset.location}</span>
-                    </div>
-                  </div>
-                </Card>
-
-                {/* Actions */}
-                <div className="flex gap-3">
-                  <Button className="flex-1 bg-[#21A68D] hover:bg-[#1a8a72]">
-                    <Wrench className="w-4 h-4 mr-2" />
-                    Schedule Service
-                  </Button>
-                  <Button variant="outline" className="flex-1">
-                    Export Report
-                  </Button>
+              <Card className="p-4 bg-muted/30">
+                <h3 className="text-sm mb-3">Details</h3>
+                <div className="space-y-2 text-sm">
+                  {selectedAsset.serial && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Serial:</span><span>{selectedAsset.serial}</span></div>
+                  )}
+                  <div className="flex justify-between"><span className="text-muted-foreground">Location:</span><span>{selectedAsset.location || '—'}</span></div>
+                  {selectedAsset.battery != null && selectedAsset.category !== 'VEHICLE' && selectedAsset.category !== 'ACCESSORY' && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Battery:</span><span>{selectedAsset.battery}%</span></div>
+                  )}
+                  {selectedAsset.flightHours != null && selectedAsset.flightHours > 0 && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">{selectedAsset.category === 'AUV' ? 'Dive Hours' : 'Flight Hours'}:</span><span>{selectedAsset.flightHours}h</span></div>
+                  )}
+                  {selectedAsset.totalOps != null && selectedAsset.totalOps > 0 && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Total Operations:</span><span>{selectedAsset.totalOps}</span></div>
+                  )}
+                  {selectedAsset.maxDepth != null && selectedAsset.maxDepth > 0 && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Max Depth:</span><span>{selectedAsset.maxDepth}m</span></div>
+                  )}
+                  {selectedAsset.plate && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Plate:</span><span>{selectedAsset.plate}</span></div>
+                  )}
+                  {selectedAsset.fuel != null && selectedAsset.category === 'VEHICLE' && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Fuel:</span><span>{selectedAsset.fuel}%</span></div>
+                  )}
+                  {selectedAsset.mileage != null && selectedAsset.mileage > 0 && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Mileage:</span><span>{selectedAsset.mileage.toLocaleString()} km</span></div>
+                  )}
+                  {selectedAsset.quantity != null && selectedAsset.category === 'ACCESSORY' && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Quantity:</span><span>{selectedAsset.quantity} pcs</span></div>
+                  )}
+                  {selectedAsset.capacity && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Capacity:</span><span>{selectedAsset.capacity}</span></div>
+                  )}
+                  {selectedAsset.voltage && (
+                    <div className="flex justify-between"><span className="text-muted-foreground">Voltage / Info:</span><span>{selectedAsset.voltage}</span></div>
+                  )}
                 </div>
+              </Card>
+
+              <div className="flex gap-3">
+                <Button className="flex-1 bg-[#21A68D] hover:bg-[#1a8a72]" onClick={() => { openEditDialog(selectedAsset); setSelectedAsset(null); }}>
+                  <Edit className="w-4 h-4 mr-2" />
+                  Edit Asset
+                </Button>
+                <Button variant="outline" className="flex-1">
+                  Export Report
+                </Button>
               </div>
-            </>
+            </div>
           )}
         </SheetContent>
       </Sheet>
 
-      {/* Add UAV Dialog */}
+      {/* ─── Add UAV Dialog ─── */}
       <Dialog open={isAddUavOpen} onOpenChange={setIsAddUavOpen}>
-        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh]">
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh] bg-[#1a1a2e] border-[#2a2a3e] text-white">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Plane className="w-5 h-5" style={{ color: '#21A68D' }} />
@@ -799,59 +705,55 @@ export default function AssetManagement() {
           </DialogHeader>
           <div className="mt-4 space-y-4">
             <div className="space-y-2">
-              <Label>Name</Label>
-              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-input" placeholder="e.g. Pyrhos X V3" />
+              <Label>Name *</Label>
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. Pyrhos X V3" />
             </div>
             <div className="space-y-2">
-              <Label>Type</Label>
+              <Label>Type *</Label>
               <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
-                <SelectTrigger className="bg-input"><SelectValue placeholder="Select type" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Aerial Quadcopter">Aerial Quadcopter</SelectItem>
-                  <SelectItem value="Tactical Drone">Tactical Drone</SelectItem>
-                  <SelectItem value="High Altitude">High Altitude</SelectItem>
-                  <SelectItem value="Fixed Wing">Fixed Wing</SelectItem>
+                <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                  {typeOptions.UAV.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
               <Label>Serial Number</Label>
-              <Input type="text" value={assetForm.serial} onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })} className="bg-input" placeholder="e.g. PXV3-2024-005" />
+              <Input type="text" value={assetForm.serial} onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. PXV3-2024-005" />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Battery Level (%)</Label>
-                <Input type="number" value={assetForm.battery} onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) || 0 })} className="bg-input" min="0" max="100" />
+                <Input type="number" value={assetForm.battery} onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" max="100" />
               </div>
               <div className="space-y-2">
                 <Label>Status</Label>
                 <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
-                  <SelectTrigger className="bg-input"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="available">Available</SelectItem>
-                    <SelectItem value="in-flight">In-Flight</SelectItem>
-                    <SelectItem value="maintenance">Maintenance</SelectItem>
-                    <SelectItem value="charging">Charging</SelectItem>
+                  <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue /></SelectTrigger>
+                  <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                    {statusOptions.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
             </div>
             <div className="space-y-2">
               <Label>Location</Label>
-              <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-input" placeholder="e.g. Hangar A" />
+              <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. Hangar A" />
             </div>
           </div>
           <DialogTrigger className="hidden" />
           <div className="mt-4 flex gap-3">
             <Button variant="outline" className="flex-1" onClick={() => setIsAddUavOpen(false)}>Cancel</Button>
-            <Button className="flex-1 bg-[#21A68D] hover:bg-[#1a8a72]" onClick={() => handleAddAsset('uav')}>Add UAV</Button>
+            <Button className="flex-1 bg-[#21A68D] hover:bg-[#1a8a72]" disabled={!assetForm.name || !assetForm.type || creating} onClick={() => handleAddAsset('uav')}>
+              {creating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Plus className="w-4 h-4 mr-2" />} Add UAV
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Add AUV Dialog */}
+      {/* ─── Add AUV Dialog ─── */}
       <Dialog open={isAddAuvOpen} onOpenChange={setIsAddAuvOpen}>
-        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh]">
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh] bg-[#1a1a2e] border-[#2a2a3e] text-white">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Ship className="w-5 h-5" style={{ color: '#0F4C75' }} />
@@ -861,63 +763,61 @@ export default function AssetManagement() {
           </DialogHeader>
           <div className="mt-4 space-y-4">
             <div className="space-y-2">
-              <Label>Name</Label>
-              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-input" placeholder="e.g. DeepSeeker V2" />
+              <Label>Name *</Label>
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. DeepSeeker V2" />
             </div>
             <div className="space-y-2">
-              <Label>Type</Label>
+              <Label>Type *</Label>
               <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
-                <SelectTrigger className="bg-input"><SelectValue placeholder="Select type" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Survey AUV">Survey AUV</SelectItem>
-                  <SelectItem value="Deep Sea AUV">Deep Sea AUV</SelectItem>
-                  <SelectItem value="Research AUV">Research AUV</SelectItem>
+                <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                  {typeOptions.AUV.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
               <Label>Serial Number</Label>
-              <Input type="text" value={assetForm.serial} onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })} className="bg-input" placeholder="e.g. DSV2-2024-004" />
+              <Input type="text" value={assetForm.serial} onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. DSV2-2024-004" />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Battery Level (%)</Label>
-                <Input type="number" value={assetForm.battery} onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) || 0 })} className="bg-input" min="0" max="100" />
+                <Input type="number" value={assetForm.battery} onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" max="100" />
               </div>
               <div className="space-y-2">
                 <Label>Max Depth (m)</Label>
-                <Input type="number" value={assetForm.maxDepth} onChange={(e) => setAssetForm({ ...assetForm, maxDepth: parseInt(e.target.value) || 0 })} className="bg-input" min="0" />
+                <Input type="number" value={assetForm.maxDepth} onChange={(e) => setAssetForm({ ...assetForm, maxDepth: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" />
               </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Status</Label>
                 <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
-                  <SelectTrigger className="bg-input"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="available">Available</SelectItem>
-                    <SelectItem value="maintenance">Maintenance</SelectItem>
-                    <SelectItem value="charging">Charging</SelectItem>
+                  <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue /></SelectTrigger>
+                  <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                    {statusOptions.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-2">
                 <Label>Location</Label>
-                <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-input" placeholder="e.g. Dock A" />
+                <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. Dock A" />
               </div>
             </div>
           </div>
           <DialogTrigger className="hidden" />
           <div className="mt-4 flex gap-3">
             <Button variant="outline" className="flex-1" onClick={() => setIsAddAuvOpen(false)}>Cancel</Button>
-            <Button className="flex-1 bg-[#0F4C75] hover:bg-[#0b3a5a]" onClick={() => handleAddAsset('auv')}>Add AUV</Button>
+            <Button className="flex-1 bg-[#0F4C75] hover:bg-[#0b3a5a]" disabled={!assetForm.name || !assetForm.type || creating} onClick={() => handleAddAsset('auv')}>
+              {creating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Plus className="w-4 h-4 mr-2" />} Add AUV
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Add Vehicle Dialog */}
+      {/* ─── Add Vehicle Dialog ─── */}
       <Dialog open={isAddVehicleOpen} onOpenChange={setIsAddVehicleOpen}>
-        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh]">
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh] bg-[#1a1a2e] border-[#2a2a3e] text-white">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Car className="w-5 h-5" style={{ color: '#D4E268' }} />
@@ -927,64 +827,61 @@ export default function AssetManagement() {
           </DialogHeader>
           <div className="mt-4 space-y-4">
             <div className="space-y-2">
-              <Label>Name</Label>
-              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-input" placeholder="e.g. Mobile Command Unit" />
+              <Label>Name *</Label>
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. Mobile Command Unit" />
             </div>
             <div className="space-y-2">
-              <Label>Type</Label>
+              <Label>Type *</Label>
               <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
-                <SelectTrigger className="bg-input"><SelectValue placeholder="Select type" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Command Vehicle">Command Vehicle</SelectItem>
-                  <SelectItem value="Support Vehicle">Support Vehicle</SelectItem>
-                  <SelectItem value="Cargo Van">Cargo Van</SelectItem>
-                  <SelectItem value="Patrol Vehicle">Patrol Vehicle</SelectItem>
+                <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                  {typeOptions.VEHICLE.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
               <Label>Plate Number</Label>
-              <Input type="text" value={assetForm.plate} onChange={(e) => setAssetForm({ ...assetForm, plate: e.target.value })} className="bg-input" placeholder="e.g. B 1234 XYZ" />
+              <Input type="text" value={assetForm.plate} onChange={(e) => setAssetForm({ ...assetForm, plate: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. B 1234 XYZ" />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Fuel Level (%)</Label>
-                <Input type="number" value={assetForm.fuel} onChange={(e) => setAssetForm({ ...assetForm, fuel: parseInt(e.target.value) || 0 })} className="bg-input" min="0" max="100" />
+                <Input type="number" value={assetForm.fuel} onChange={(e) => setAssetForm({ ...assetForm, fuel: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" max="100" />
               </div>
               <div className="space-y-2">
                 <Label>Mileage (km)</Label>
-                <Input type="number" value={assetForm.mileage} onChange={(e) => setAssetForm({ ...assetForm, mileage: parseInt(e.target.value) || 0 })} className="bg-input" min="0" />
+                <Input type="number" value={assetForm.mileage} onChange={(e) => setAssetForm({ ...assetForm, mileage: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" />
               </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Status</Label>
                 <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
-                  <SelectTrigger className="bg-input"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="available">Available</SelectItem>
-                    <SelectItem value="in-use">In-Use</SelectItem>
-                    <SelectItem value="maintenance">Maintenance</SelectItem>
+                  <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue /></SelectTrigger>
+                  <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                    {statusOptions.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-2">
                 <Label>Location</Label>
-                <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-input" placeholder="e.g. Base Garage" />
+                <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. Base Garage" />
               </div>
             </div>
           </div>
           <DialogTrigger className="hidden" />
           <div className="mt-4 flex gap-3">
             <Button variant="outline" className="flex-1" onClick={() => setIsAddVehicleOpen(false)}>Cancel</Button>
-            <Button className="flex-1 bg-[#D4E268] hover:bg-[#c2d050] text-black" onClick={() => handleAddAsset('vehicles')}>Add Vehicle</Button>
+            <Button className="flex-1 bg-[#D4E268] hover:bg-[#c2d050] text-black" disabled={!assetForm.name || !assetForm.type || creating} onClick={() => handleAddAsset('vehicles')}>
+              {creating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Plus className="w-4 h-4 mr-2" />} Add Vehicle
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Add Accessory Dialog */}
+      {/* ─── Add Accessory Dialog ─── */}
       <Dialog open={isAddAccessoryOpen} onOpenChange={setIsAddAccessoryOpen}>
-        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh]">
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh] bg-[#1a1a2e] border-[#2a2a3e] text-white">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Package className="w-5 h-5" style={{ color: '#8b5cf6' }} />
@@ -994,36 +891,29 @@ export default function AssetManagement() {
           </DialogHeader>
           <div className="mt-4 space-y-4">
             <div className="space-y-2">
-              <Label>Name</Label>
-              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-input" placeholder="e.g. LiPo Battery 6S" />
+              <Label>Name *</Label>
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. LiPo Battery 6S" />
             </div>
             <div className="space-y-2">
-              <Label>Type</Label>
+              <Label>Type *</Label>
               <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
-                <SelectTrigger className="bg-input"><SelectValue placeholder="Select type" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Battery">Battery</SelectItem>
-                  <SelectItem value="Camera">Camera</SelectItem>
-                  <SelectItem value="Propeller">Propeller</SelectItem>
-                  <SelectItem value="Sensor">Sensor</SelectItem>
-                  <SelectItem value="Charger">Charger</SelectItem>
-                  <SelectItem value="Controller">Controller</SelectItem>
+                <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                  {typeOptions.ACCESSORY.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Quantity</Label>
-                <Input type="number" value={assetForm.quantity} onChange={(e) => setAssetForm({ ...assetForm, quantity: parseInt(e.target.value) || 0 })} className="bg-input" min="0" />
+                <Input type="number" value={assetForm.quantity} onChange={(e) => setAssetForm({ ...assetForm, quantity: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" />
               </div>
               <div className="space-y-2">
                 <Label>Status</Label>
                 <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
-                  <SelectTrigger className="bg-input"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="available">Available</SelectItem>
-                    <SelectItem value="in-use">In-Use</SelectItem>
-                    <SelectItem value="maintenance">Maintenance</SelectItem>
+                  <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue /></SelectTrigger>
+                  <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                    {statusOptions.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
@@ -1031,118 +921,124 @@ export default function AssetManagement() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Capacity</Label>
-                <Input type="text" value={assetForm.capacity} onChange={(e) => setAssetForm({ ...assetForm, capacity: e.target.value })} className="bg-input" placeholder="e.g. 22000mAh" />
+                <Input type="text" value={assetForm.capacity} onChange={(e) => setAssetForm({ ...assetForm, capacity: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. 22000mAh" />
               </div>
               <div className="space-y-2">
-                <Label>Voltage</Label>
-                <Input type="text" value={assetForm.voltage} onChange={(e) => setAssetForm({ ...assetForm, voltage: e.target.value })} className="bg-input" placeholder="e.g. 22.2V" />
+                <Label>Voltage / Info</Label>
+                <Input type="text" value={assetForm.voltage} onChange={(e) => setAssetForm({ ...assetForm, voltage: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" placeholder="e.g. 22.2V" />
               </div>
             </div>
           </div>
           <DialogTrigger className="hidden" />
           <div className="mt-4 flex gap-3">
             <Button variant="outline" className="flex-1" onClick={() => setIsAddAccessoryOpen(false)}>Cancel</Button>
-            <Button className="flex-1 bg-[#8b5cf6] hover:bg-[#7c3aed]" onClick={() => handleAddAsset('accessories')}>Add Accessory</Button>
+            <Button className="flex-1 bg-[#8b5cf6] hover:bg-[#7c3aed]" disabled={!assetForm.name || !assetForm.type || creating} onClick={() => handleAddAsset('accessories')}>
+              {creating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Plus className="w-4 h-4 mr-2" />} Add Accessory
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Edit Asset Dialog */}
+      {/* ─── Edit Asset Dialog ─── */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px]">
+        <DialogContent className="w-full sm:w-[600px] sm:max-w-[600px] overflow-y-auto max-h-[85vh] bg-[#1a1a2e] border-[#2a2a3e] text-white">
           <DialogHeader>
             <DialogTitle>Edit Asset</DialogTitle>
-            <DialogDescription>
-              Edit the asset details.
-            </DialogDescription>
+            <DialogDescription>Edit the asset details.</DialogDescription>
           </DialogHeader>
 
-          <div className="mt-6 space-y-4 max-h-[60vh] overflow-y-auto">
+          <div className="mt-4 space-y-4">
             <div className="space-y-2">
               <Label>Name</Label>
-              <Input
-                type="text"
-                value={assetForm.name}
-                onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })}
-                className="bg-input"
-              />
+              <Input type="text" value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" />
             </div>
 
             <div className="space-y-2">
               <Label>Type</Label>
-              <Input
-                type="text"
-                value={assetForm.type}
-                onChange={(e) => setAssetForm({ ...assetForm, type: e.target.value })}
-                className="bg-input"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Status</Label>
-              <Select
-                value={assetForm.status}
-                onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}
-              >
-                <SelectTrigger className="bg-input">
-                  <SelectValue placeholder="Select status">{assetForm.status}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="available">Available</SelectItem>
-                  <SelectItem value="in-flight">In-Flight</SelectItem>
-                  <SelectItem value="in-use">In-Use</SelectItem>
-                  <SelectItem value="maintenance">Maintenance</SelectItem>
-                  <SelectItem value="charging">Charging</SelectItem>
+              <Select value={assetForm.type} onValueChange={(value) => setAssetForm({ ...assetForm, type: value })}>
+                <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue placeholder="Select type">{assetForm.type}</SelectValue></SelectTrigger>
+                <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                  {(typeOptions[currentCategory] || typeOptions.UAV).map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-2">
-              <Label>Battery Level</Label>
-              <Input
-                type="number"
-                value={assetForm.battery}
-                onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) || 0 })}
-                className="bg-input"
-                min="0"
-                max="100"
-              />
+              <Label>Status</Label>
+              <Select value={assetForm.status} onValueChange={(value) => setAssetForm({ ...assetForm, status: value })}>
+                <SelectTrigger className="bg-[#0f0f1e] border-[#2a2a3e] text-white"><SelectValue placeholder="Select status">{statusLabel(assetForm.status)}</SelectValue></SelectTrigger>
+                <SelectContent className="bg-[#1a1a2e] border-[#2a2a3e] text-white">
+                  {statusOptions.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
+
+            {/* Category-specific fields */}
+            {(currentCategory === 'UAV' || currentCategory === 'AUV') && (
+              <>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Battery Level</Label>
+                    <Input type="number" value={assetForm.battery} onChange={(e) => setAssetForm({ ...assetForm, battery: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" max="100" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Serial Number</Label>
+                    <Input type="text" value={assetForm.serial} onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" />
+                  </div>
+                </div>
+                {currentCategory === 'AUV' && (
+                  <div className="space-y-2">
+                    <Label>Max Depth (m)</Label>
+                    <Input type="number" value={assetForm.maxDepth} onChange={(e) => setAssetForm({ ...assetForm, maxDepth: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" />
+                  </div>
+                )}
+              </>
+            )}
+
+            {currentCategory === 'VEHICLE' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Fuel Level (%)</Label>
+                  <Input type="number" value={assetForm.fuel} onChange={(e) => setAssetForm({ ...assetForm, fuel: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" max="100" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Plate Number</Label>
+                  <Input type="text" value={assetForm.plate} onChange={(e) => setAssetForm({ ...assetForm, plate: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Mileage (km)</Label>
+                  <Input type="number" value={assetForm.mileage} onChange={(e) => setAssetForm({ ...assetForm, mileage: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" />
+                </div>
+              </div>
+            )}
+
+            {currentCategory === 'ACCESSORY' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Quantity</Label>
+                  <Input type="number" value={assetForm.quantity} onChange={(e) => setAssetForm({ ...assetForm, quantity: parseInt(e.target.value) || 0 })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" min="0" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Capacity</Label>
+                  <Input type="text" value={assetForm.capacity} onChange={(e) => setAssetForm({ ...assetForm, capacity: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Voltage / Info</Label>
+                  <Input type="text" value={assetForm.voltage} onChange={(e) => setAssetForm({ ...assetForm, voltage: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" />
+                </div>
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label>Location</Label>
-              <Input
-                type="text"
-                value={assetForm.location}
-                onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })}
-                className="bg-input"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Serial Number</Label>
-              <Input
-                type="text"
-                value={assetForm.serial}
-                onChange={(e) => setAssetForm({ ...assetForm, serial: e.target.value })}
-                className="bg-input"
-              />
+              <Input type="text" value={assetForm.location} onChange={(e) => setAssetForm({ ...assetForm, location: e.target.value })} className="bg-[#0f0f1e] border-[#2a2a3e] text-white" />
             </div>
           </div>
 
-          <div className="mt-6 flex gap-3">
-            <Button
-              variant="outline"
-              className="flex-1"
-              onClick={() => setIsEditDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              className="flex-1 bg-[#21A68D] hover:bg-[#1a8a72]"
-              onClick={handleEditAsset}
-            >
-              Save Changes
+          <div className="mt-4 flex gap-3">
+            <Button variant="outline" className="flex-1" onClick={() => setIsEditDialogOpen(false)}>Cancel</Button>
+            <Button className="flex-1 bg-[#21A68D] hover:bg-[#1a8a72]" disabled={updating} onClick={handleEditAsset}>
+              {updating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Edit className="w-4 h-4 mr-2" />} Save Changes
             </Button>
           </div>
         </DialogContent>

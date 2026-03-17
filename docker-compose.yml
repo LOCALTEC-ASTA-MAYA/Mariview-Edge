@@ -116,9 +116,10 @@ services:
       - MINIO_ENDPOINT=locallitix-minio:9000
       - MINIO_ACCESS_KEY=komandan
       - MINIO_SECRET_KEY=supersecretpassword
-      - COOKIE_DOMAIN=localhost
-      - COOKIE_SECURE=false
-      - CORS_ORIGIN=http://localhost:${PORT_UI:-3000} # <-- Fleksibel untuk FE yang akses
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-localhost}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - COOKIE_SAMESITE=${COOKIE_SAMESITE:-Lax}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:${PORT_UI:-3000}}
       - DRONE_MODE=${DRONE_MODE:-virtual}                
       - DISABLE_DRONE_SIM=${DISABLE_DRONE_SIM:-false}   
     ports:

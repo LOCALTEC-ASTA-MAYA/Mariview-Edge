@@ -97,6 +97,7 @@ func LoginHandler() http.HandlerFunc {
 		// Set HttpOnly cookie
 		cookieDomain := os.Getenv("COOKIE_DOMAIN")
 		cookieSecure := os.Getenv("COOKIE_SECURE") == "true"
+		sameSite := parseSameSite(os.Getenv("COOKIE_SAMESITE"))
 
 		http.SetCookie(w, &http.Cookie{
 			Name:     "session_token",
@@ -106,7 +107,7 @@ func LoginHandler() http.HandlerFunc {
 			MaxAge:   tokenResp.ExpiresIn,
 			HttpOnly: true,
 			Secure:   cookieSecure,
-			SameSite: http.SameSiteStrictMode,
+			SameSite: sameSite,
 		})
 
 		// Parse JWT to extract user info for response
@@ -136,6 +137,8 @@ func LogoutHandler() http.HandlerFunc {
 
 		cookieDomain := os.Getenv("COOKIE_DOMAIN")
 
+		sameSite := parseSameSite(os.Getenv("COOKIE_SAMESITE"))
+
 		http.SetCookie(w, &http.Cookie{
 			Name:     "session_token",
 			Value:    "",
@@ -144,7 +147,7 @@ func LogoutHandler() http.HandlerFunc {
 			MaxAge:   -1,
 			HttpOnly: true,
 			Secure:   os.Getenv("COOKIE_SECURE") == "true",
-			SameSite: http.SameSiteStrictMode,
+			SameSite: sameSite,
 			Expires:  time.Unix(0, 0),
 		})
 
@@ -237,5 +240,19 @@ func buildUserResponse(claims jwt.MapClaims) LoginResponse {
 		Email:    email,
 		Name:     name,
 		Roles:    roles,
+	}
+}
+
+// parseSameSite converts COOKIE_SAMESITE env to http.SameSite
+func parseSameSite(val string) http.SameSite {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "strict":
+		return http.SameSiteStrictMode
+	case "none":
+		return http.SameSiteNoneMode
+	case "lax", "":
+		return http.SameSiteLaxMode
+	default:
+		return http.SameSiteLaxMode
 	}
 }
